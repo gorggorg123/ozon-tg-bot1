@@ -92,16 +92,25 @@ async def telegram_webhook(request: Request):
 
     message = update.get("message") or {}
     chat = message.get("chat") or {}
-    text = message.get("text") or ""
+    raw_text = message.get("text") or ""
 
     chat_id = chat.get("id")
     if chat_id is None:
         return {"ok": True}
 
-    text = (text or "").strip()
+    # Нормализуем исходный текст
+    raw_text = (raw_text or "").strip()
 
-    # ----- Команда /start -----
-    if text == "/start":
+    # Разбираем команду:
+    # "/fin_today@MyBot arg1 arg2" -> cmd="/fin_today"
+    if raw_text.startswith("/"):
+        first_token = raw_text.split()[0]      # "/fin_today@MyBot"
+        cmd = first_token.split("@")[0]        # "/fin_today"
+    else:
+        cmd = raw_text
+
+    # ----- /start -----
+    if cmd == "/start":
         tg_call("sendMessage", {
             "chat_id": chat_id,
             "text": (
@@ -112,8 +121,8 @@ async def telegram_webhook(request: Request):
         })
         return {"ok": True}
 
-    # ----- Команда /fin_today -----
-    if text == "/fin_today":
+    # ----- /fin_today -----
+    if cmd == "/fin_today":
         try:
             date_from, date_to = msk_today_range_iso()
             body = {
@@ -193,9 +202,9 @@ async def telegram_webhook(request: Request):
 
         return {"ok": True}
 
-    # ----- Все остальные сообщения — эхо -----
+    # ----- Всё остальное — эхо -----
     tg_call("sendMessage", {
         "chat_id": chat_id,
-        "text": f"Ты написал: {text}\n\nДоступные команды:\n/start\n/fin_today"
+        "text": f"Ты написал: {raw_text}\n\nДоступные команды:\n/start\n/fin_today"
     })
     return {"ok": True}
