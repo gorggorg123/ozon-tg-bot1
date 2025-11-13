@@ -179,4 +179,3 @@ async def telegram_webhook(request: Request):
 
     # Если Telegram прислал что-то ещё (например, service message)
     return {"ok": True}
-    

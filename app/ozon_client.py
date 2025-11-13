@@ -99,3 +99,4 @@ def rub0(x: float) -> str:
         n = 0
     s = f"{n:,}".replace(",", " ")
     return f"{s} ₽"
+
