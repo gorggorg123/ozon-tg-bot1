@@ -1,49 +1,52 @@
-import asyncio
-from contextlib import asynccontextmanager
+import os
 
-from ozonapi import SellerAPI
+from dotenv import load_dotenv
+from ozonapi import SellerAPI  # из пакета ozonapi-async
 
 
-@asynccontextmanager
-async def get_api():
-    """
-    Универсальный асинхронный контекстный менеджер для SellerAPI.
-
-    Конфигурация берётся из .env / переменных окружения:
-    OZON_SELLER_CLIENT_ID, OZON_SELLER_API_KEY и т.д.
-    """
-    async with SellerAPI() as api:
-        yield api
+# Подгружаем .env (локально). На Render переменные берутся из настроек сервиса.
+load_dotenv()
 
 
 async def build_seller_info_message() -> str:
     """
-    Строит текстовое сообщение с информацией об аккаунте Ozon.
-    Используется в /seller_info и кнопке 'ℹ️ Аккаунт Ozon'.
+    Получает информацию о продавце через SellerAPI Ульянова
+    и возвращает готовый текст для Telegram.
     """
+    # Если client_id / api_key не заданы — сразу понятная ошибка
+    client_id = os.getenv("OZON_SELLER_CLIENT_ID")
+    api_key = os.getenv("OZON_SELLER_API_KEY")
+
+    if not client_id or not api_key:
+        return (
+            "⚠️ Не заданы ключи Ozon Seller API.\n\n"
+            "Проверь переменные окружения:\n"
+            "<code>OZON_SELLER_CLIENT_ID</code>\n"
+            "<code>OZON_SELLER_API_KEY</code>"
+        )
+
     async with SellerAPI() as api:
+        # Конфиг возьмётся автоматически из .env / переменных окружения
         info = await api.seller_info()
 
-    company = info.company
+    # Структура в библиотеке такая: info.company.name / info.company.inn
+    company = getattr(info, "company", None)
+    name = getattr(company, "name", None) if company else None
+    inn = getattr(company, "inn", None) if company else None
 
-    # Защита от None, если каких-то полей нет
-    name = company.name or "—"
-    inn = company.inn or "—"
-    ogrn = getattr(company, "ogrn", None) or "—"
+    lines: list[str] = ["👤 <b>Информация о продавце Ozon</b>"]
 
-    msg = (
-        "<b>ℹ️ Информация об аккаунте Ozon</b>\n\n"
-        f"<b>Компания:</b> {name}\n"
-        f"<b>ИНН:</b> <code>{inn}</code>\n"
-        f"<b>ОГРН:</b> <code>{ogrn}</code>\n"
-    )
-    return msg
+    if name:
+        lines.append(f"🏢 Компания: <b>{name}</b>")
+    if inn:
+        lines.append(f"📄 ИНН: <code>{inn}</code>")
 
+    if not name and not inn:
+        # На всякий случай, если структура вдруг другая
+        lines.append("Не удалось красиво разобрать ответ от Ozon Seller API.")
+        lines.append("Но соединение с SellerAPI работает ✅")
 
-# Небольшой локальный тест, если захочешь проверить из консоли
-if __name__ == "__main__":
-    async def _test():
-        text = await build_seller_info_message()
-        print(text)
+    lines.append("")
+    lines.append("Данные получены через библиотеку <i>ozonapi-async</i>.")
 
-    asyncio.run(_test())
+    return "\n".join(lines)

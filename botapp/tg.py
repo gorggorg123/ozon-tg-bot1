@@ -1,6 +1,5 @@
-import inspect
-import logging
 import os
+from typing import Any, Dict, Optional
 
 import httpx
 from fastapi import APIRouter, Request
@@ -8,195 +7,158 @@ from fastapi import APIRouter, Request
 from .finance import build_fin_today_message
 from .ozon_client import build_seller_info_message
 
-logger = logging.getLogger("ozon_tg_bot")
+BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
+
+if not BOT_TOKEN:
+    raise RuntimeError("Не задан TG_BOT_TOKEN в переменных окружения")
+
+TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 router = APIRouter()
 
-TG_BOT_TOKEN = os.environ["TG_BOT_TOKEN"]
-TG_API_URL = f"https://api.telegram.org/bot{TG_BOT_TOKEN}"
 
-
-def tg_call(method: str, payload: dict) -> dict:
-    """Низкоуровневый вызов Telegram Bot API."""
-    resp = httpx.post(f"{TG_API_URL}/{method}", json=payload, timeout=15)
+async def tg_call(method: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Универсальный вызов Telegram Bot API.
+    Не кидает исключения при ошибке — только логирует.
+    """
+    url = f"{TELEGRAM_API}/{method}"
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.post(url, json=payload)
     data = resp.json()
 
     if not data.get("ok"):
-        desc = str(data.get("description", "")).lower()
-        code = data.get("error_code")
-
-        # ВАЖНО: игнорируем 'message is not modified'
-        if code == 400 and "message is not modified" in desc:
-            logger.info("Telegram %s: message is not modified, игнорируем", method)
-            return data
-
-        logger.error("Telegram %s ERROR: %s", method, data)
-        raise RuntimeError(f"Telegram {method} -> {data}")
+        # Просто логируем, чтобы бот не падал с 500
+        print(f"Telegram {method} ERROR: {data}")
 
     return data
 
 
-def send_message(chat_id: int, text: str, reply_markup: dict | None = None):
-    payload: dict = {
-        "chat_id": chat_id,
-        "text": text,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": True,
-    }
-    if reply_markup is not None:
-        payload["reply_markup"] = reply_markup
-
-    return tg_call("sendMessage", payload)
-
-
-def edit_message_text(
+async def send_message(
     chat_id: int,
-    message_id: int,
     text: str,
-    reply_markup: dict | None = None,
-):
-    payload: dict = {
+    reply_markup: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
         "chat_id": chat_id,
-        "message_id": message_id,
         "text": text,
         "parse_mode": "HTML",
-        "disable_web_page_preview": True,
     }
     if reply_markup is not None:
         payload["reply_markup"] = reply_markup
+    return await tg_call("sendMessage", payload)
 
-    return tg_call("editMessageText", payload)
 
+# ---------- Клавиатуры ----------
 
-# --- Клавиатуры -----------------------------------------------------------
-
-# Главное меню
-kb_root = {
-    "inline_keyboard": [
-        [
-            {"text": "💰 Финансы за сегодня", "callback_data": "fin_today"},
-        ],
-        [
-            {"text": "ℹ️ Аккаунт Ozon", "callback_data": "seller_info"},
-        ],
-    ]
-}
-
-# Клавиатура для экранов с отчётами / информацией
-kb_back = {
-    "inline_keyboard": [
-        [
-            {"text": "🔙 В меню", "callback_data": "back_to_menu"},
-        ]
-    ]
+KB_ROOT: Dict[str, Any] = {
+    "keyboard": [
+        [{"text": "📊 Полная аналитика"}],
+        [{"text": "📦 FBO"}],
+        [{"text": "💰 Финансы"}],
+        [{"text": "⭐️ Отзывы"}],
+        [{"text": "🧠 ИИ"}],
+        [{"text": "ℹ️ Аккаунт Ozon"}],  # новая кнопка
+    ],
+    "resize_keyboard": True,
 }
 
 
-# --- Вспомогалки ---------------------------------------------------------
-
-async def _get_fin_today_message() -> str:
-    """
-    Универсальный обёртка над build_fin_today_message.
-
-    Работает и если build_fin_today_message является обычной функцией,
-    и если она async (корутина).
-    """
-    result = build_fin_today_message()
-    if inspect.iscoroutine(result):
-        result = await result
-    return result
+WELCOME_TEXT = (
+    "Привет! 😊 Я бот на FastAPI + Render.\n\n"
+    "⚙️ Сейчас умею:\n"
+    "/fin_today — сводка по финансам за сегодня (по API Ozon)\n"
+    "/seller_info — информация о продавце (через ozonapi-async)\n\n"
+    "Выберите раздел в меню ниже 👇"
+)
 
 
-async def _handle_command_start(chat_id: int):
-    text = (
-        "Привет! 😊 Я бот на FastAPI + Render.\n"
-        "⚙️ Сейчас умею:\n"
-        "• <b>/fin_today</b> — сводка по финансам за сегодня (API Ozon)\n"
-        "• <b>/seller_info</b> — информация об аккаунте продавца Ozon\n\n"
-        "Выбери действие ниже 👇"
-    )
-    send_message(chat_id, text, kb_root)
+# ---------- Webhook ----------
 
-
-async def _handle_fin_today(chat_id: int, message_id: int | None = None):
-    try:
-        msg = await _get_fin_today_message()
-    except Exception as e:
-        logger.exception("Ошибка при получении финансов за сегодня")
-        msg = f"⚠️ Не удалось получить финансы за сегодня.\n\n<code>{e}</code>"
-
-    if message_id is None:
-        send_message(chat_id, msg, kb_back)
-    else:
-        edit_message_text(chat_id, message_id, msg, kb_back)
-
-
-async def _handle_seller_info(chat_id: int, message_id: int | None = None):
-    try:
-        msg = await build_seller_info_message()
-    except Exception as e:
-        logger.exception("Ошибка при получении seller_info")
-        msg = f"⚠️ Не удалось получить информацию об аккаунте Ozon.\n\n<code>{e}</code>"
-
-    if message_id is None:
-        send_message(chat_id, msg, kb_back)
-    else:
-        edit_message_text(chat_id, message_id, msg, kb_back)
-
-
-async def _handle_back_to_menu(chat_id: int, message_id: int):
-    text = "Главное меню. Выбери действие 👇"
-    edit_message_text(chat_id, message_id, text, kb_root)
-
-
-# --- Основной webhook -----------------------------------------------------
 
 @router.post("/tg")
 async def telegram_webhook(request: Request):
     update = await request.json()
-    logger.info("Telegram update: %s", update)
+    print("Telegram update:", update)
 
-    # 1) Обычные сообщения
     message = update.get("message") or update.get("edited_message")
-    if message:
-        chat_id = message["chat"]["id"]
-        text = (message.get("text") or "").strip()
-
-        if text == "/start":
-            await _handle_command_start(chat_id)
-            return {"ok": True}
-
-        if text == "/fin_today":
-            await _handle_fin_today(chat_id, message_id=None)
-            return {"ok": True}
-
-        if text == "/seller_info":
-            await _handle_seller_info(chat_id, message_id=None)
-            return {"ok": True}
-
-        # Любой другой текст — просто показываем меню
-        await _handle_command_start(chat_id)
+    if not message:
+        # Игнорируем callback_query и прочее, пока они нам не нужны
         return {"ok": True}
 
-    # 2) Callback-кнопки
-    callback = update.get("callback_query")
-    if callback:
-        data = callback.get("data") or ""
-        message = callback["message"]
-        chat_id = message["chat"]["id"]
-        message_id = message["message_id"]
+    chat_id: int = message["chat"]["id"]
+    text: str = message.get("text") or ""
 
-        if data == "fin_today":
-            await _handle_fin_today(chat_id, message_id)
-            return {"ok": True}
+    # --- команды ---
 
-        if data == "seller_info":
-            await _handle_seller_info(chat_id, message_id)
-            return {"ok": True}
+    if text.startswith("/start"):
+        await send_message(chat_id, WELCOME_TEXT, reply_markup=KB_ROOT)
+        return {"ok": True}
 
-        if data == "back_to_menu":
-            await _handle_back_to_menu(chat_id, message_id)
-            return {"ok": True}
+    if text == "/fin_today" or text == "💰 Финансы":
+        try:
+            msg = build_fin_today_message()  # синхронная функция, как и раньше
+        except Exception as e:
+            msg = f"⚠️ Не удалось получить финансы за сегодня.\n{e}"
+        await send_message(chat_id, msg, reply_markup=KB_ROOT)
+        return {"ok": True}
 
-    # 3) Всё остальное (service messages и т.п.)
+    if text in ("/seller_info", "ℹ️ Аккаунт Ozon"):
+        try:
+            msg = await build_seller_info_message()
+        except Exception as e:
+            msg = f"⚠️ Не удалось получить информацию о продавце.\n{e}"
+        await send_message(chat_id, msg, reply_markup=KB_ROOT)
+        return {"ok": True}
+
+    if text == "Меню":
+        await send_message(chat_id, "Выберите раздел 👇", reply_markup=KB_ROOT)
+        return {"ok": True}
+
+    # --- заглушки для остальных кнопок ---
+
+    if text == "📊 Полная аналитика":
+        await send_message(
+            chat_id,
+            "Раздел 📊 Полная аналитика пока в разработке.",
+            reply_markup=KB_ROOT,
+        )
+        return {"ok": True}
+
+    if text == "📦 FBO":
+        await send_message(
+            chat_id,
+            "Раздел 📦 FBO пока в разработке.",
+            reply_markup=KB_ROOT,
+        )
+        return {"ok": True}
+
+    if text == "⭐️ Отзывы":
+        await send_message(
+            chat_id,
+            "Раздел ⭐️ Отзывы пока в разработке.",
+            reply_markup=KB_ROOT,
+        )
+        return {"ok": True}
+
+    if text == "🧠 ИИ":
+        await send_message(
+            chat_id,
+            "Раздел 🧠 ИИ пока в разработке.",
+            reply_markup=KB_ROOT,
+        )
+        return {"ok": True}
+
+    # --- ответ по умолчанию ---
+
+    await send_message(
+        chat_id,
+        (
+            "Я пока понимаю команды:\n"
+            "/fin_today — финансы за сегодня\n"
+            "/seller_info — информация о продавце\n\n"
+            "И кнопки в меню 👇"
+        ),
+        reply_markup=KB_ROOT,
+    )
     return {"ok": True}
