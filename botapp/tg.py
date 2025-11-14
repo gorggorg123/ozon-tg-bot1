@@ -1,5 +1,3 @@
-# botapp/tg.py
-
 import json
 import os
 
@@ -18,17 +16,46 @@ if not TG_BOT_TOKEN:
 
 TG_API_URL = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/" if TG_BOT_TOKEN else None
 
-# Клавиатура главного меню
-KB_ROOT = {
-    "keyboard": [
-        [{"text": "📊 Полная аналитика"}],
-        [{"text": "📦 FBO"}],
-        [{"text": "📊 Финансы"}],
-        [{"text": "⭐ Отзывы"}],
-        [{"text": "🧠 ИИ"}],
-        [{"text": "🧾 Аккаунт Ozon"}],
-    ],
-    "resize_keyboard": True,
+# Инлайн-клавиатура главного меню
+KB_ROOT_INLINE: dict = {
+    "inline_keyboard": [
+        [
+            {
+                "text": "📊 Финансы за сегодня",
+                "callback_data": "fin_today",
+            }
+        ],
+        [
+            {
+                "text": "🧾 Аккаунт Ozon",
+                "callback_data": "seller_info",
+            }
+        ],
+        [
+            {
+                "text": "📊 Полная аналитика",
+                "callback_data": "analytics",
+            }
+        ],
+        [
+            {
+                "text": "📦 FBO",
+                "callback_data": "fbo",
+            }
+        ],
+        [
+            {
+                "text": "⭐ Отзывы",
+                "callback_data": "reviews",
+            }
+        ],
+        [
+            {
+                "text": "🧠 ИИ",
+                "callback_data": "ai",
+            }
+        ],
+    ]
 }
 
 
@@ -50,14 +77,16 @@ async def tg_call(method: str, payload: dict) -> dict:
         return {"ok": False, "status_code": resp.status_code}
 
     if not data.get("ok"):
-        # Просто логируем, но не поднимаем исключение
+        # Просто логируем ошибку, но не кидаем исключение
         print(f"Telegram {method} error: {data}")
 
     return data
 
 
 async def send_message(
-    chat_id: int, text: str, reply_markup: dict | None = None
+    chat_id: int,
+    text: str,
+    reply_markup: dict | None = None,
 ) -> None:
     payload: dict = {
         "chat_id": chat_id,
@@ -74,14 +103,86 @@ async def send_message(
 async def telegram_webhook(request: Request):
     """
     Единственная точка входа для вебхука.
-    Обрабатываем только обычные сообщения (message).
+    Обрабатываем:
+      * обычные сообщения (message, edited_message)
+      * нажатия на инлайн-кнопки (callback_query)
     """
     update = await request.json()
     print("Telegram update:", update)
 
+    # --- 1) Обработка инлайн-кнопок (callback_query) ---
+    callback_query = update.get("callback_query")
+    if callback_query:
+        cq_id = callback_query.get("id")
+        message = callback_query.get("message") or {}
+        chat = message.get("chat") or {}
+        chat_id = chat.get("id")
+        data = callback_query.get("data") or ""
+
+        if chat_id is None:
+            return {"ok": True}
+
+        # Ответ на конкретные callback_data
+        if data == "fin_today":
+            try:
+                msg = await build_fin_today_message()
+            except Exception as e:
+                msg = f"⚠️ Не удалось получить финансы за сегодня.\nОшибка: {e!s}"
+
+            await send_message(chat_id, msg, reply_markup=KB_ROOT_INLINE)
+
+        elif data == "seller_info":
+            try:
+                msg = await build_seller_info_message()
+            except Exception as e:
+                msg = f"⚠️ Не удалось получить данные аккаунта Ozon.\nОшибка: {e!s}"
+
+            await send_message(chat_id, msg, reply_markup=KB_ROOT_INLINE)
+
+        elif data == "analytics":
+            await send_message(
+                chat_id,
+                "Раздел *«📊 Полная аналитика»* пока в разработке.\n"
+                "Данные будем тянуть через SellerAPI Ульянова (ozonapi-async).",
+                reply_markup=KB_ROOT_INLINE,
+            )
+
+        elif data == "fbo":
+            await send_message(
+                chat_id,
+                "Раздел *«📦 FBO»* пока в разработке.\n"
+                "Позже сюда добавим отчёты по складам/остаткам через SellerAPI.",
+                reply_markup=KB_ROOT_INLINE,
+            )
+
+        elif data == "reviews":
+            await send_message(
+                chat_id,
+                "Раздел *«⭐ Отзывы»* пока в разработке.",
+                reply_markup=KB_ROOT_INLINE,
+            )
+
+        elif data == "ai":
+            await send_message(
+                chat_id,
+                "Раздел *«🧠 ИИ»* пока в разработке.\n"
+                "План: брифинг, цели месяца, прогноз, план закупок и свободные вопросы.",
+                reply_markup=KB_ROOT_INLINE,
+            )
+
+        # Ответ Telegram, чтобы убрать "часики" на кнопке
+        if cq_id:
+            await tg_call(
+                "answerCallbackQuery",
+                {"callback_query_id": cq_id},
+            )
+
+        return {"ok": True}
+
+    # --- 2) Обычные сообщения (message / edited_message) ---
     message = update.get("message") or update.get("edited_message")
     if not message:
-        # Например, service message — просто подтверждаем
+        # service message и т.п. – просто ОК
         return {"ok": True}
 
     chat = message.get("chat") or {}
@@ -91,85 +192,43 @@ async def telegram_webhook(request: Request):
 
     text = message.get("text") or ""
 
-    # --- /start + возврат в меню ---
+    # --- /start и возврат в меню ---
     if text.startswith("/start") or text == "Меню":
-        # Сначала убираем старую клавиатуру, чтобы Телега точно её сбросила
         await send_message(
             chat_id,
-            "Обновляю меню…",
-            reply_markup={"remove_keyboard": True},
-        )
-        # Потом отправляем актуальное меню с кнопкой «🧾 Аккаунт Ozon»
-        await send_message(
-            chat_id,
+            "Привет! 😊 Я бот на FastAPI + Render.\n"
+            "Сейчас умею:\n"
+            "• *📊 Финансы за сегодня* — сводка по API Ozon\n"
+            "• *🧾 Аккаунт Ozon* — данные продавца через SellerAPI Ульянова\n\n"
             "Выберите раздел 👇",
-            reply_markup=KB_ROOT,
+            reply_markup=KB_ROOT_INLINE,
         )
         return {"ok": True}
 
-    # --- Финансы за сегодня ---
-    if text in ("/fin_today", "📊 Финансы"):
+    # --- Текстовая команда /fin_today (на всякий случай) ---
+    if text.startswith("/fin_today"):
         try:
             msg = await build_fin_today_message()
         except Exception as e:
             msg = f"⚠️ Не удалось получить финансы за сегодня.\nОшибка: {e!s}"
 
-        await send_message(chat_id, msg, reply_markup=KB_ROOT)
+        await send_message(chat_id, msg, reply_markup=KB_ROOT_INLINE)
         return {"ok": True}
 
-    # --- Информация о продавце (SellerAPI Ульянова) ---
-    if text in ("/seller_info", "🧾 Аккаунт Ozon"):
+    # --- Текстовая команда /seller_info ---
+    if text.startswith("/seller_info"):
         try:
             msg = await build_seller_info_message()
         except Exception as e:
-            msg = f"⚠️ Не удалось получить информацию о продавце.\nОшибка: {e!s}"
+            msg = f"⚠️ Не удалось получить данные аккаунта Ozon.\nОшибка: {e!s}"
 
-        await send_message(chat_id, msg, reply_markup=KB_ROOT)
+        await send_message(chat_id, msg, reply_markup=KB_ROOT_INLINE)
         return {"ok": True}
 
-    # --- Заглушки для остальных разделов главного меню ---
-
-    if text == "📊 Полная аналитика":
-        await send_message(
-            chat_id,
-            "Раздел *«📊 Полная аналитика»* пока не реализован.\n"
-            "Сейчас доступен блок *«📊 Финансы за сегодня»* и информация об аккаунте Ozon.",
-            reply_markup=KB_ROOT,
-        )
-        return {"ok": True}
-
-    if text == "📦 FBO":
-        await send_message(
-            chat_id,
-            "Раздел *«📦 FBO»* пока не реализован.\n"
-            "Позже здесь будут отчёты по FBO-отгрузкам.",
-            reply_markup=KB_ROOT,
-        )
-        return {"ok": True}
-
-    if text == "⭐ Отзывы":
-        await send_message(
-            chat_id,
-            "Раздел *«⭐ Отзывы»* пока не реализован.\n"
-            "План: уведомления о новых отзывах и быстрые ответы.",
-            reply_markup=KB_ROOT,
-        )
-        return {"ok": True}
-
-    if text == "🧠 ИИ":
-        await send_message(
-            chat_id,
-            "Раздел *«🧠 ИИ»* пока не реализован.\n"
-            "План: брифинг по магазину, цели месяца и помощь с аналитикой.",
-            reply_markup=KB_ROOT,
-        )
-        return {"ok": True}
-
-    # --- Фолбэк на непонятный текст ---
+    # --- Всё остальное — предлагаем меню ---
     await send_message(
         chat_id,
-        "Я пока не понимаю этот запрос.\n"
-        "Выберите раздел с помощью кнопок ниже 👇",
-        reply_markup=KB_ROOT,
+        "Не понял команду 🤔\nИспользуй меню ниже:",
+        reply_markup=KB_ROOT_INLINE,
     )
     return {"ok": True}
