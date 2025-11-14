@@ -1,52 +1,173 @@
+import json
 import os
+from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 
+import httpx
 from dotenv import load_dotenv
-from ozonapi import SellerAPI  # из пакета ozonapi-async
 
+# Пытаемся подключить библиотеку Ульянова
+try:
+    from ozonapi import SellerAPI  # type: ignore
+except ImportError:  # ozonapi-async не установлен
+    SellerAPI = None  # type: ignore[assignment]
 
-# Подгружаем .env (локально). На Render переменные берутся из настроек сервиса.
+# Локальная разработка: подхватить .env
 load_dotenv()
+
+OZON_API_URL = os.getenv("OZON_API_URL", "https://api-seller.ozon.ru")
+
+MSK_TZ = timezone(timedelta(hours=3))
+
+
+@lru_cache()
+def get_credentials() -> tuple[str, str]:
+    """
+    Берём Client-Id и Api-Key из переменных окружения.
+    Используются и для прямых запросов, и для SellerAPI.
+    """
+    client_id = os.getenv("OZON_CLIENT_ID")
+    api_key = os.getenv("OZON_API_KEY")
+
+    if not client_id or not api_key:
+        raise RuntimeError(
+            "Не заданы переменные окружения OZON_CLIENT_ID и OZON_API_KEY."
+        )
+
+    return client_id, api_key
+
+
+def _auth_headers() -> dict:
+    client_id, api_key = get_credentials()
+    return {
+        "Client-Id": client_id,
+        "Api-Key": api_key,
+        "Content-Type": "application/json",
+    }
+
+
+async def ozon_post(path: str, payload: dict) -> dict:
+    """
+    Универсальный POST к Seller API.
+    """
+    url = OZON_API_URL.rstrip("/") + path
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(url, json=payload, headers=_auth_headers())
+
+    resp.raise_for_status()
+    return resp.json()
+
+
+def today_msk_range_utc() -> tuple[str, str]:
+    """
+    Границы текущего дня по МСК, переведённые в UTC и отформатированные
+    как 2025-11-13T00:00:00Z (без миллисекунд).
+    """
+    now_msk = datetime.now(MSK_TZ)
+    start_msk = now_msk.replace(hour=0, minute=0, second=0, microsecond=0)
+    end_msk = start_msk + timedelta(days=1)
+
+    start_utc = start_msk.astimezone(timezone.utc)
+    end_utc = end_msk.astimezone(timezone.utc)
+
+    fmt = "%Y-%m-%dT%H:%M:%SZ"
+    return start_utc.strftime(fmt), end_utc.strftime(fmt)
+
+
+# --- Пример: прямой вызов /v3/finance/transaction/totals через HTTP ---
+
+async def api_finance_totals_today() -> dict:
+    """
+    Прямой запрос к /v3/finance/transaction/totals на сегодня (по МСК).
+    Сейчас не используется в боте, но может пригодиться дальше.
+    """
+    date_from, date_to = today_msk_range_utc()
+
+    payload = {
+        "date_time_from": date_from,
+        "date_time_to": date_to,
+        "transaction_type": "all",
+    }
+
+    return await ozon_post("/v3/finance/transaction/totals", payload)
+
+
+# --- SellerAPI Ульянова: информация о продавце ---
+
+
+@lru_cache()
+def _seller_api_kwargs() -> dict:
+    """
+    Параметры для инициализации SellerAPI.
+    Если потом перейдём на конфиг-класс — поменяется только здесь.
+    """
+    client_id, api_key = get_credentials()
+    return {
+        "client_id": client_id,
+        "api_key": api_key,
+    }
+
+
+async def api_seller_info() -> object:
+    """
+    Получить seller_info через ozonapi-async.
+    """
+    if SellerAPI is None:
+        raise RuntimeError(
+            "Библиотека ozonapi-async не установлена. "
+            "Добавь её в requirements.txt и сделай redeploy."
+        )
+
+    kwargs = _seller_api_kwargs()
+    async with SellerAPI(**kwargs) as api:  # type: ignore[call-arg]
+        return await api.seller_info()
 
 
 async def build_seller_info_message() -> str:
     """
-    Получает информацию о продавце через SellerAPI Ульянова
-    и возвращает готовый текст для Telegram.
+    Собираем красивое текстовое сообщение для Телеграма
+    по результату seller_info().
     """
-    # Если client_id / api_key не заданы — сразу понятная ошибка
-    client_id = os.getenv("OZON_SELLER_CLIENT_ID")
-    api_key = os.getenv("OZON_SELLER_API_KEY")
+    try:
+        info = await api_seller_info()
+    except Exception as e:
+        return f"⚠️ Не удалось получить информацию о продавце.\nОшибка: {e!s}"
 
-    if not client_id or not api_key:
-        return (
-            "⚠️ Не заданы ключи Ozon Seller API.\n\n"
-            "Проверь переменные окружения:\n"
-            "<code>OZON_SELLER_CLIENT_ID</code>\n"
-            "<code>OZON_SELLER_API_KEY</code>"
-        )
+    # Пытаемся аккуратно вытащить основные поля.
+    try:
+        lines: list[str] = ["🧾 Аккаунт Ozon", ""]
 
-    async with SellerAPI() as api:
-        # Конфиг возьмётся автоматически из .env / переменных окружения
-        info = await api.seller_info()
+        company = getattr(info, "company", None)
 
-    # Структура в библиотеке такая: info.company.name / info.company.inn
-    company = getattr(info, "company", None)
-    name = getattr(company, "name", None) if company else None
-    inn = getattr(company, "inn", None) if company else None
+        if company is not None:
+            name = getattr(company, "name", None)
+            inn = getattr(company, "inn", None)
+            ogrn = getattr(company, "ogrn", None)
+            address = getattr(company, "address", None)
 
-    lines: list[str] = ["👤 <b>Информация о продавце Ozon</b>"]
+            if name:
+                lines.append(f"🏢 Компания: {name}")
+            if inn:
+                lines.append(f"ИНН: {inn}")
+            if ogrn:
+                lines.append(f"ОГРН: {ogrn}")
+            if address:
+                lines.append(f"📍 Юр. адрес: {address}")
+        else:
+            # Если структура вдруг другая — просто выводим JSON
+            data = info
+            if hasattr(info, "model_dump"):
+                data = info.model_dump()  # type: ignore[attr-defined]
+            elif hasattr(info, "dict"):
+                data = info.dict()  # type: ignore[call-arg]
 
-    if name:
-        lines.append(f"🏢 Компания: <b>{name}</b>")
-    if inn:
-        lines.append(f"📄 ИНН: <code>{inn}</code>")
+            lines.append("```json")
+            lines.append(json.dumps(data, ensure_ascii=False, indent=2))
+            lines.append("```")
 
-    if not name and not inn:
-        # На всякий случай, если структура вдруг другая
-        lines.append("Не удалось красиво разобрать ответ от Ozon Seller API.")
-        lines.append("Но соединение с SellerAPI работает ✅")
+        return "\n".join(lines)
 
-    lines.append("")
-    lines.append("Данные получены через библиотеку <i>ozonapi-async</i>.")
-
-    return "\n".join(lines)
+    except Exception:
+        # На всякий случай совсем универсальный fallback
+        return f"🧾 Аккаунт Ozon:\n{info!r}"
