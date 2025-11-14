@@ -1,3 +1,5 @@
+# botapp/tg.py
+
 import json
 import os
 
@@ -14,9 +16,7 @@ TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
 if not TG_BOT_TOKEN:
     print("⚠️ TG_BOT_TOKEN не задан. Бот не сможет отправлять сообщения в Telegram.")
 
-TG_API_URL = (
-    f"https://api.telegram.org/bot{TG_BOT_TOKEN}/" if TG_BOT_TOKEN else None
-)
+TG_API_URL = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/" if TG_BOT_TOKEN else None
 
 # Клавиатура главного меню
 KB_ROOT = {
@@ -35,7 +35,7 @@ KB_ROOT = {
 async def tg_call(method: str, payload: dict) -> dict:
     """
     Вызов метода Telegram Bot API.
-    Ошибки логируем, но не роняем сервер (чтобы не было 500 из-за editMessageText).
+    Ошибки логируем, но не роняем сервер.
     """
     if not TG_API_URL:
         raise RuntimeError("TG_BOT_TOKEN не задан.")
@@ -56,7 +56,9 @@ async def tg_call(method: str, payload: dict) -> dict:
     return data
 
 
-async def send_message(chat_id: int, text: str, reply_markup: dict | None = None) -> None:
+async def send_message(
+    chat_id: int, text: str, reply_markup: dict | None = None
+) -> None:
     payload: dict = {
         "chat_id": chat_id,
         "text": text,
@@ -91,6 +93,13 @@ async def telegram_webhook(request: Request):
 
     # --- /start + возврат в меню ---
     if text.startswith("/start") or text == "Меню":
+        # Сначала убираем старую клавиатуру, чтобы Телега точно её сбросила
+        await send_message(
+            chat_id,
+            "Обновляю меню…",
+            reply_markup={"remove_keyboard": True},
+        )
+        # Потом отправляем актуальное меню с кнопкой «🧾 Аккаунт Ozon»
         await send_message(
             chat_id,
             "Выберите раздел 👇",
@@ -110,7 +119,11 @@ async def telegram_webhook(request: Request):
 
     # --- Информация о продавце (SellerAPI Ульянова) ---
     if text in ("/seller_info", "🧾 Аккаунт Ozon"):
-        msg = await build_seller_info_message()
+        try:
+            msg = await build_seller_info_message()
+        except Exception as e:
+            msg = f"⚠️ Не удалось получить информацию о продавце.\nОшибка: {e!s}"
+
         await send_message(chat_id, msg, reply_markup=KB_ROOT)
         return {"ok": True}
 
@@ -123,4 +136,40 @@ async def telegram_webhook(request: Request):
             "Сейчас доступен блок *«📊 Финансы за сегодня»* и информация об аккаунте Ozon.",
             reply_markup=KB_ROOT,
         )
-        return
+        return {"ok": True}
+
+    if text == "📦 FBO":
+        await send_message(
+            chat_id,
+            "Раздел *«📦 FBO»* пока не реализован.\n"
+            "Позже здесь будут отчёты по FBO-отгрузкам.",
+            reply_markup=KB_ROOT,
+        )
+        return {"ok": True}
+
+    if text == "⭐ Отзывы":
+        await send_message(
+            chat_id,
+            "Раздел *«⭐ Отзывы»* пока не реализован.\n"
+            "План: уведомления о новых отзывах и быстрые ответы.",
+            reply_markup=KB_ROOT,
+        )
+        return {"ok": True}
+
+    if text == "🧠 ИИ":
+        await send_message(
+            chat_id,
+            "Раздел *«🧠 ИИ»* пока не реализован.\n"
+            "План: брифинг по магазину, цели месяца и помощь с аналитикой.",
+            reply_markup=KB_ROOT,
+        )
+        return {"ok": True}
+
+    # --- Фолбэк на непонятный текст ---
+    await send_message(
+        chat_id,
+        "Я пока не понимаю этот запрос.\n"
+        "Выберите раздел с помощью кнопок ниже 👇",
+        reply_markup=KB_ROOT,
+    )
+    return {"ok": True}
