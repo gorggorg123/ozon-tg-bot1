@@ -27,6 +27,7 @@ TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
 if not TG_BOT_TOKEN:
     raise RuntimeError("Не задан TG_BOT_TOKEN в переменных окружения")
 
+
 # ---------- Aiogram ----------
 bot = Bot(
     token=TG_BOT_TOKEN,
@@ -111,8 +112,17 @@ async def _run_bot() -> None:
 async def on_startup() -> None:
     """
     Render запускает uvicorn main:app → FastAPI вызывает этот хук.
-    Внутри поднимаем бота в отдельной задаче.
+    При старте:
+      1) Отключаем webhook у бота (на всякий случай).
+      2) Запускаем long polling.
     """
+    # Убираем активный webhook, иначе getUpdates (long polling) не работает
+    try:
+        await bot.delete_webhook(drop_pending_updates=True)
+        logger.info("Webhook удалён (delete_webhook). Переключаемся на long polling.")
+    except Exception as e:
+        logger.warning("Не удалось удалить webhook: %s", e)
+
     asyncio.create_task(_run_bot())
     logger.info("Startup completed: bot task created.")
 
