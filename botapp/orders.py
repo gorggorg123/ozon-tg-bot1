@@ -1,128 +1,121 @@
 # botapp/orders.py
+
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Any, Dict, List, Tuple
+import datetime as dt
+import os
+from typing import Any, List
 
-from .ozon_client import (
-    OzonClient,
-    msk_today_range,
-    msk_current_month_range,
-    fmt_int,
-    fmt_rub0,
-    s_num,
-)
+import httpx
+
+MSK_TZ = dt.timezone(dt.timedelta(hours=3))
+OZON_BASE_URL = "https://api-seller.ozon.ru"
+
+OZON_CLIENT_ID = os.getenv("OZON_CLIENT_ID")
+OZON_API_KEY = os.getenv("OZON_API_KEY")
 
 
-def _parse_date(v: Any) -> datetime | None:
-    if not v:
-        return None
-    if isinstance(v, datetime):
-        return v
-    s = str(v).replace(" ", "T")
+def _to_ozon_ts(d: dt.datetime) -> str:
+    """Переводим дату в формат RFC3339 Z (UTC), как любит Ozon."""
+    return (
+        d.astimezone(dt.timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+
+
+async def _fetch_fbo_postings_today() -> List[dict]:
+    """
+    Возвращает список заказов FBO за текущие сутки по МСК.
+    Делает прямой POST /v2/posting/fbo/list.
+    """
+
+    if not OZON_CLIENT_ID or not OZON_API_KEY:
+        raise RuntimeError("Не заданы OZON_CLIENT_ID / OZON_API_KEY")
+
+    now_msk = dt.datetime.now(tz=MSK_TZ)
+    start = now_msk.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = now_msk.replace(hour=23, minute=59, second=59, microsecond=0)
+
+    payload = {
+        "dir": "asc",
+        "filter": {
+            "since": _to_ozon_ts(start),
+            "to": _to_ozon_ts(end),
+        },
+        "limit": 1000,
+        "offset": 0,
+        "with": {
+            "analytics_data": False,
+            "financial_data": False,
+        },
+    }
+
+    headers = {
+        "Client-Id": OZON_CLIENT_ID,
+        "Api-Key": OZON_API_KEY,
+        "Content-Type": "application/json",
+    }
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.post(
+            f"{OZON_BASE_URL}/v2/posting/fbo/list",
+            json=payload,
+            headers=headers,
+        )
+        resp.raise_for_status()
+        data: Any = resp.json()
+
+    # Защита от разных форматов ответа
+    if isinstance(data, list):
+        return data
+
+    if isinstance(data, dict):
+        # классический ответ Ozon: {"result": [ ... ]}
+        if isinstance(data.get("result"), list):
+            return data["result"]
+        # на всякий случай
+        if isinstance(data.get("postings"), list):
+            return data["postings"]
+
+    # pydantic-модель из библиотеки Ульянова (на будущее)
+    if hasattr(data, "result") and isinstance(data.result, list):
+        return data.result
+    if hasattr(data, "postings") and isinstance(data.postings, list):
+        return data.postings
+
+    return []
+
+
+async def get_orders_today_text() -> str:
+    """
+    Формирует текст для раздела «Заказы за сегодня».
+    """
+
     try:
-        return datetime.fromisoformat(s.replace("Z", "+00:00"))
-    except Exception:
-        return None
-
-
-def _get_acceptance_dt(p: Dict[str, Any]) -> datetime | None:
-    for key in (
-        "in_process_at",
-        "in_process_date",
-        "acceptance_dt",
-        "processed_at",
-        "processing_dt",
-        "approved_at",
-    ):
-        d = _parse_date(p.get(key))
-        if d:
-            return d
-    return None
-
-
-def _is_cancelled(p: Dict[str, Any]) -> bool:
-    st = str(p.get("status", "")).lower()
-    return "cancel" in st or "canceled" in st or "cancellation" in st
-
-
-def _posting_total_price(p: Dict[str, Any]) -> float:
-    ad = p.get("analytics_data") or p.get("analyticsData") or {}
-    ad_price = s_num(ad.get("total_price") or ad.get("price"))
-    if ad_price > 0:
-        return ad_price
-
-    products = p.get("products") or []
-    if not isinstance(products, list):
-        return 0.0
-
-    total = 0.0
-    for t in products:
-        q = s_num(
-            t.get("quantity")
-            or t.get("offer_quantity")
-            or t.get("items_count")
+        postings = await _fetch_fbo_postings_today()
+    except Exception as e:
+        return (
+            "⚠️ Не удалось получить заказы за сегодня.\n"
+            f"Ошибка: {e}"
         )
-        u = s_num(
-            t.get("price")
-            or t.get("client_price")
-            or t.get("original_price")
-        )
-        total += q * u
-    return total
 
+    if not postings:
+        return "📦 За сегодня заказов нет."
 
-def _summarize_orders(postings: List[Dict[str, Any]]) -> Tuple[int, int, float, float]:
-    """
-    Вернёт: (all_orders, ok_orders, sum_all, sum_ok)
-    """
-    all_orders = 0
-    ok_orders = 0
-    sum_all = 0.0
-    sum_ok = 0.0
+    total = len(postings)
+    delivered = sum(1 for p in postings if p.get("status") == "delivered")
+    cancelled = sum(1 for p in postings if p.get("status") == "cancelled")
+    in_work = total - delivered - cancelled
 
-    for p in postings:
-        total = _posting_total_price(p)
-        all_orders += 1
-        sum_all += total
-        if not _is_cancelled(p):
-            ok_orders += 1
-            sum_ok += total
+    lines = [
+        "📦 *Заказы за сегодня*",
+        "",
+        f"Всего заказов: *{total}*",
+        f"✅ Доставлено: *{delivered}*",
+        f"🚚 В обработке: *{in_work}*",
+        f"❌ Отменено: *{cancelled}*",
+    ]
 
-    return all_orders, ok_orders, sum_all, sum_ok
-
-
-async def get_orders_today_text(client: OzonClient) -> str:
-    since, to, pretty = msk_today_range()
-    postings = await client.get_fbo_postings(since, to)
-
-    all_orders, ok_orders, sum_all, sum_ok = _summarize_orders(postings)
-    cancelled = all_orders - ok_orders
-    avg = sum_ok / ok_orders if ok_orders else 0.0
-
-    return (
-        "<b>📦 Заказы за сегодня (FBO)</b>\n"
-        f"{pretty}\n\n"
-        f"🧾 Заказано: {fmt_int(all_orders)} / {fmt_rub0(sum_all)}\n"
-        f"✅ Без отмен: {fmt_int(ok_orders)} / {fmt_rub0(sum_ok)}\n"
-        f"❌ Отмен:     {fmt_int(cancelled)}\n"
-        f"🧮 Средний чек: {fmt_rub0(avg)}"
-    )
-
-
-async def get_orders_month_summary_text(client: OzonClient) -> str:
-    since, to, pretty = msk_current_month_range()
-    postings = await client.get_fbo_postings(since, to)
-
-    all_orders, ok_orders, sum_all, sum_ok = _summarize_orders(postings)
-    cancelled = all_orders - ok_orders
-    avg = sum_ok / ok_orders if ok_orders else 0.0
-
-    return (
-        "<b>📦 FBO • текущий месяц</b>\n"
-        f"{pretty}\n\n"
-        f"🧾 Заказано: {fmt_int(all_orders)} / {fmt_rub0(sum_all)}\n"
-        f"✅ Без отмен: {fmt_int(ok_orders)} / {fmt_rub0(sum_ok)}\n"
-        f"❌ Отмен:     {fmt_int(cancelled)}\n"
-        f"🧮 Средний чек: {fmt_rub0(avg)}"
-    )
+    return "\n".join(lines)

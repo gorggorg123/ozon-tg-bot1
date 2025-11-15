@@ -1,39 +1,73 @@
 # botapp/account.py
+
 from __future__ import annotations
 
-from typing import Dict, Any
+import json
+import os
+from typing import Any
 
-from .ozon_client import OzonClient, fmt_int
+import httpx
+
+OZON_BASE_URL = "https://api-seller.ozon.ru"
+OZON_CLIENT_ID = os.getenv("OZON_CLIENT_ID")
+OZON_API_KEY = os.getenv("OZON_API_KEY")
 
 
-async def get_account_info_text(client: OzonClient) -> str:
-    info: Dict[str, Any] = await client.get_company_info()
+async def _fetch_company_info() -> dict[str, Any]:
+    if not OZON_CLIENT_ID or not OZON_API_KEY:
+        raise RuntimeError("Не заданы OZON_CLIENT_ID / OZON_API_KEY")
 
-    name = info.get("name") or info.get("legal_name") or "Без названия"
-    region = info.get("region") or info.get("region_name") or ""
-    city = info.get("city") or ""
-    warehouses = info.get("warehouses") or info.get("warehouse_list") or []
+    headers = {
+        "Client-Id": OZON_CLIENT_ID,
+        "Api-Key": OZON_API_KEY,
+        "Content-Type": "application/json",
+    }
 
-    wh_lines = []
-    if isinstance(warehouses, list) and warehouses:
-        for w in warehouses[:5]:
-            w_name = w.get("name") or w.get("warehouse_name") or "Склад"
-            w_city = w.get("city") or w.get("address", {}).get("city") or ""
-            wh_lines.append(f"• {w_name}" + (f" ({w_city})" if w_city else ""))
-    else:
-        wh_lines.append("• нет данных по складам в API-ответе")
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.post(
+            f"{OZON_BASE_URL}/v1/company/info",
+            json={},          # важно: POST с пустым JSON
+            headers=headers,
+        )
+        resp.raise_for_status()
+        data: Any = resp.json()
 
-    balance = info.get("balance") or info.get("current_balance")
+    # Ozon обычно возвращает {"result": {...}}
+    if isinstance(data, dict) and isinstance(data.get("result"), dict):
+        return data["result"]
+    return data
 
-    text = (
-        "<b>📄 Аккаунт Ozon</b>\n\n"
-        f"Название: <b>{name}</b>\n"
-    )
-    if city or region:
-        text += f"Регион: {city or ''}{', ' if city and region else ''}{region or ''}\n"
 
-    if balance is not None:
-        text += f"Баланс (по данным API, если есть): {fmt_int(balance)} ₽\n"
+async def get_account_info_text() -> str:
+    try:
+        info = await _fetch_company_info()
+    except Exception as e:
+        return (
+            "⚠️ Не удалось получить данные аккаунта.\n"
+            f"Ошибка: {e}"
+        )
 
-    text += "\n<b>Склады</b>\n" + "\n".join(wh_lines)
-    return text
+    company_name = info.get("name") or info.get("company_name")
+    inn = info.get("inn")
+    ogrn = info.get("ogrn")
+    region = info.get("region")
+    email = info.get("email")
+
+    lines = ["👤 *Аккаунт Ozon*:", ""]
+
+    if company_name:
+        lines.append(f"🏢 Компания: *{company_name}*")
+    if inn:
+        lines.append(f"🧾 ИНН: `{inn}`")
+    if ogrn:
+        lines.append(f"📄 ОГРН: `{ogrn}`")
+    if region:
+        lines.append(f"📍 Регион: {region}")
+    if email:
+        lines.append(f"✉️ Email: {email}")
+
+    # На всякий случай приложим сырой JSON снизу
+    lines.append("")
+    lines.append("`" + json.dumps(info, ensure_ascii=False) + "`")
+
+    return "\n".join(lines)

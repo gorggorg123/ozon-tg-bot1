@@ -1,64 +1,58 @@
-# main.py
-import asyncio
-import logging
-import os
+# main.py (фрагменты)
 
-from fastapi import FastAPI
-from aiogram import Bot, Dispatcher
-from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode
+from aiogram import Bot, Dispatcher, F, Router
+from aiogram.filters import CommandStart
+from aiogram.types import Message, CallbackQuery
 
-from botapp.ozon_client import OzonClient
-from botapp.tg import register_handlers
+from botapp.tg import main_menu_kb
+from botapp.finance import get_finance_today_text
+from botapp.orders import get_orders_today_text
+from botapp.account import get_account_info_text
+from botapp.reviews import get_reviews_menu_text  # как у тебя сейчас
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
-logger = logging.getLogger("main")
+router = Router()
 
-TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN", "")
-OZON_CLIENT_ID = os.getenv("OZON_CLIENT_ID", "")
-OZON_API_KEY = os.getenv("OZON_API_KEY", "")
-
-if not TG_BOT_TOKEN:
-    raise RuntimeError("TG_BOT_TOKEN is not set")
-if not OZON_CLIENT_ID or not OZON_API_KEY:
-    raise RuntimeError("OZON_CLIENT_ID / OZON_API_KEY are not set")
-
-bot = Bot(
-    token=TG_BOT_TOKEN,
-    default=DefaultBotProperties(parse_mode=ParseMode.HTML),
-)
-dp = Dispatcher()
-
-ozon_client = OzonClient(OZON_CLIENT_ID, OZON_API_KEY)
-register_handlers(dp, ozon_client)
-
-app = FastAPI()
-
-
-@app.on_event("startup")
-async def on_startup() -> None:
-    logger.info("Startup: creating polling task")
-    asyncio.create_task(start_bot())
-
-
-@app.on_event("shutdown")
-async def on_shutdown() -> None:
-    logger.info("Shutdown: closing Ozon client and bot")
-    await ozon_client.aclose()
-    await bot.session.close()
-
-
-async def start_bot() -> None:
-    logger.info("Запускаю Telegram-бота (long polling)…")
-    await dp.start_polling(
-        bot,
-        allowed_updates=dp.resolve_used_update_types(),
+@router.message(CommandStart())
+async def cmd_start(message: Message) -> None:
+    text = (
+        "Этот раздел ещё в разработке.\n\n"
+        "Сейчас доступны:"
     )
+    await message.answer(text, reply_markup=main_menu_kb())
 
 
-@app.get("/")
-async def root() -> dict:
-    return {"status": "ok", "detail": "Ozon bot is running"}
+# --- callbacks ---
+
+@router.callback_query(F.data == "fin_today")
+async def cb_fin_today(callback: CallbackQuery) -> None:
+    await callback.answer()  # закрываем часы
+    text = await get_finance_today_text()
+    await callback.message.answer(text)
+
+
+@router.callback_query(F.data == "orders_today")
+async def cb_orders_today(callback: CallbackQuery) -> None:
+    await callback.answer()
+    text = await get_orders_today_text()
+    await callback.message.answer(text)
+
+
+@router.callback_query(F.data == "account_info")
+async def cb_account_info(callback: CallbackQuery) -> None:
+    await callback.answer()
+    text = await get_account_info_text()
+    await callback.message.answer(text)
+
+
+@router.callback_query(F.data == "full_analytics")
+async def cb_full_analytics(callback: CallbackQuery) -> None:
+    await callback.answer()
+    # пока заглушка, позже допилим по Ульянову
+    await callback.message.answer("📊 Полная аналитика скоро будет доступна.")
+
+
+@router.callback_query(F.data == "reviews")
+async def cb_reviews(callback: CallbackQuery) -> None:
+    await callback.answer()
+    text = await get_reviews_menu_text()
+    await callback.message.answer(text)
