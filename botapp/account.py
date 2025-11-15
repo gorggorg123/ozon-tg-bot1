@@ -1,37 +1,39 @@
 # botapp/account.py
+from __future__ import annotations
 
-"""
-Раздел "Аккаунт Ozon".
+from typing import Dict, Any
 
-Пока делаем лёгкую версию без сторонней библиотеки `ozonapi`,
-чтобы ничего не падало на Render. Позже сюда можно аккуратно
-добавлять запросы к API по мотивам библиотеки Ульянова.
-"""
-
-import os
+from .ozon_client import OzonClient, fmt_int
 
 
-async def get_account_info_text() -> str:
-    """
-    Возвращает простой текст с инфой об аккаунте Ozon.
+async def get_account_info_text(client: OzonClient) -> str:
+    info: Dict[str, Any] = await client.get_company_info()
 
-    Здесь НЕТ сетевых запросов, поэтому:
-    - ничего не ломается, даже если с Ozon API что-то случится;
-    - нет зависимости от пакета `ozonapi`.
-    """
+    name = info.get("name") or info.get("legal_name") or "Без названия"
+    region = info.get("region") or info.get("region_name") or ""
+    city = info.get("city") or ""
+    warehouses = info.get("warehouses") or info.get("warehouse_list") or []
 
-    client_id = os.getenv("OZON_CLIENT_ID", "— не задан —")
-    seller_name = os.getenv("OZON_SELLER_NAME", "Мой магазин на Ozon")
+    wh_lines = []
+    if isinstance(warehouses, list) and warehouses:
+        for w in warehouses[:5]:
+            w_name = w.get("name") or w.get("warehouse_name") or "Склад"
+            w_city = w.get("city") or w.get("address", {}).get("city") or ""
+            wh_lines.append(f"• {w_name}" + (f" ({w_city})" if w_city else ""))
+    else:
+        wh_lines.append("• нет данных по складам в API-ответе")
+
+    balance = info.get("balance") or info.get("current_balance")
 
     text = (
-        "🧾 <b>Аккаунт Ozon</b>\n"
-        "\n"
-        f"Магазин: <b>{seller_name}</b>\n"
-        f"Client-Id: <code>{client_id}</code>\n"
-        "\n"
-        "Этот раздел ещё в разработке.\n"
-        "Позже сюда добавим детальную статистику по API "
-        "по мотивам библиотеки Ульянова: обороты, склады, рейтинги и т.п."
+        "<b>📄 Аккаунт Ozon</b>\n\n"
+        f"Название: <b>{name}</b>\n"
     )
+    if city or region:
+        text += f"Регион: {city or ''}{', ' if city and region else ''}{region or ''}\n"
 
+    if balance is not None:
+        text += f"Баланс (по данным API, если есть): {fmt_int(balance)} ₽\n"
+
+    text += "\n<b>Склады</b>\n" + "\n".join(wh_lines)
     return text

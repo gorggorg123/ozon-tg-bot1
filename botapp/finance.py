@@ -1,35 +1,31 @@
+# botapp/finance.py
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Dict, Any
 
-from .ozon_client import ozon_post, msk_day_range
-
-
-def _snum(x: Any) -> float:
-    try:
-        return float(str(x).replace(" ", "").replace("\u00a0", "").replace(",", "."))
-    except Exception:
-        return 0.0
-
-
-def _fmt_int(n: float | int) -> str:
-    return f"{int(round(n)):,}".replace(",", " ")
-
-
-def _rub0(n: float | int) -> str:
-    return f"{_fmt_int(n)} ₽"
+from .ozon_client import (
+    OzonClient,
+    msk_today_range,
+    msk_current_month_range,
+    fmt_rub0,
+    fmt_int,
+    s_num,
+)
 
 
 def _sales_from_totals(t: Dict[str, Any]) -> float:
-    return _snum(t.get("accruals_for_sale")) - _snum(t.get("refunds_and_cancellations"))
+    # как в JS: продажи = начислено за продажи – возвраты/отмены
+    return s_num(t.get("accruals_for_sale")) - s_num(
+        t.get("refunds_and_cancellations")
+    )
 
 
 def _build_expenses(t: Dict[str, Any]) -> float:
-    sc = _snum(t.get("sale_commission"))
-    pad = _snum(t.get("processing_and_delivery"))
-    rfc = _snum(t.get("refunds_and_cancellations"))
-    sa = _snum(t.get("services_amount"))
-    oa = _snum(t.get("others_amount"))
+    sc = s_num(t.get("sale_commission"))
+    pad = s_num(t.get("processing_and_delivery"))
+    rfc = s_num(t.get("refunds_and_cancellations"))
+    sa = s_num(t.get("services_amount"))
+    oa = s_num(t.get("others_amount"))
 
     commission = abs(sc)
     delivery = abs(pad)
@@ -40,45 +36,49 @@ def _build_expenses(t: Dict[str, Any]) -> float:
 
 def _accrued_from_totals(t: Dict[str, Any]) -> float:
     return (
-        _snum(t.get("accruals_for_sale"))
-        + _snum(t.get("sale_commission"))
-        + _snum(t.get("processing_and_delivery"))
-        + _snum(t.get("refunds_and_cancellations"))
-        + _snum(t.get("services_amount"))
-        + _snum(t.get("others_amount"))
-        + _snum(t.get("compensation_amount"))
+        s_num(t.get("accruals_for_sale"))
+        + s_num(t.get("sale_commission"))
+        + s_num(t.get("processing_and_delivery"))
+        + s_num(t.get("refunds_and_cancellations"))
+        + s_num(t.get("services_amount"))
+        + s_num(t.get("others_amount"))
+        + s_num(t.get("compensation_amount"))
     )
 
 
-async def get_finance_today_text() -> str:
-    """
-    Готовый текст для Telegram: финансы за текущие сутки (по МСК).
-    """
-    rng = msk_day_range()
-
-    payload = {
-        "date": {
-            "from": rng["since"],
-            "to": rng["to"],
-        },
-        "transaction_type": "all",
-    }
-
-    data = await ozon_post("/v3/finance/transaction/totals", payload)
-    totals = data.get("result") or {}
+async def get_finance_today_text(client: OzonClient) -> str:
+    since, to, pretty = msk_today_range()
+    totals = await client.get_finance_totals(since, to)
 
     accrued = _accrued_from_totals(totals)
     sales = _sales_from_totals(totals)
     expenses = _build_expenses(totals)
-    profit_before_cost = sales - expenses
+    profit = sales - expenses
 
-    text = (
+    return (
         "<b>🏦 Финансы за сегодня</b>\n"
-        f"{rng['pretty']}\n\n"
-        f"💰 Начислено: {_rub0(accrued)}\n"
-        f"🛒 Продажи:   {_rub0(sales)}\n"
-        f"💸 Расходы:   {_rub0(expenses)}\n"
-        f"📈 Прибыль до себестоимости: {_rub0(profit_before_cost)}"
+        f"{pretty}\n\n"
+        f"💰 Начислено: {fmt_rub0(accrued)}\n"
+        f"🛒 Продажи:   {fmt_rub0(sales)}\n"
+        f"💸 Расходы:   {fmt_rub0(expenses)}\n"
+        f"📈 Прибыль до себестоимости: {fmt_rub0(profit)}"
     )
 
-    return text
+
+async def get_finance_month_summary_text(client: OzonClient) -> str:
+    since, to, pretty = msk_current_month_range()
+    totals = await client.get_finance_totals(since, to)
+
+    accrued = _accrued_from_totals(totals)
+    sales = _sales_from_totals(totals)
+    expenses = _build_expenses(totals)
+    profit = sales - expenses
+
+    return (
+        "<b>🏦 Финансы • текущий месяц</b>\n"
+        f"{pretty}\n\n"
+        f"💰 Начислено: {fmt_rub0(accrued)}\n"
+        f"🛒 Продажи:   {fmt_rub0(sales)}\n"
+        f"💸 Расходы:   {fmt_rub0(expenses)}\n"
+        f"📈 Прибыль до себестоимости: {fmt_rub0(profit)}"
+    )
