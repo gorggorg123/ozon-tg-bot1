@@ -1,2 +1,3 @@
-# Помечаем пакет, чтобы Python его видел
-__all__ = ["tg", "ozon_client"]
+"""
+botapp package — логика Telegram-бота для Ozon Seller.
+"""

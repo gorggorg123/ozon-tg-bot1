@@ -1,54 +1,84 @@
-# botapp/finance.py
-import json
+from __future__ import annotations
 
-from .ozon_client import ozon_call, today_msk_range_utc
+from typing import Dict, Any
 
-
-async def get_today_finance_totals() -> dict:
-    """
-    /v3/finance/transaction/totals
-    Требует либо posting_number, либо диапазон date.
-    Мы передаём date (сегодня по МСК).
-    """
-    date_from, date_to = today_msk_range_utc()
-
-    payload = {
-        "filter": {
-            "transaction_type": "all",  # безопасно: все операции
-            "posting_number": [],
-            "date": {
-                "from": date_from,
-                "to": date_to,
-            },
-        }
-    }
-
-    return await ozon_call("/v3/finance/transaction/totals", payload)
+from .ozon_client import ozon_raw_post, msk_day_range
 
 
-async def build_fin_today_message() -> str:
-    """
-    Строим сообщение для кнопки «📊 Финансы сегодня».
-    Пока показываем сырые данные totals в виде JSON, но аккуратно,
-    чтобы не ломать Markdown.
-    """
-    date_from, date_to = today_msk_range_utc()
+def _s_num(x: Any) -> float:
+    try:
+        return float(str(x).replace(" ", "").replace("\u00a0", ""))
+    except Exception:
+        return 0.0
 
-    totals = await get_today_finance_totals()
 
-    snippet = json.dumps(totals, ensure_ascii=False, indent=2)
-    # Ограничим размер, чтобы влезло в Telegram
-    if len(snippet) > 3500:
-        snippet = snippet[:3500] + "\n..."
+def _fmt_int(n: float | int) -> str:
+    return f"{int(round(n)):,}".replace(",", " ")
 
-    msg = (
-        "*📊 Финансы за сегодня*\n\n"
-        "Период (МСК):\n"
-        f"`{date_from}` — `{date_to}`\n\n"
-        "Сводка Ozon (transaction/totals):\n"
-        "```json\n"
-        f"{snippet}\n"
-        "```"
+
+def _rub0(n: float | int) -> str:
+    return f"{_fmt_int(n)} ₽"
+
+
+def _sales_from_totals(t: Dict[str, Any]) -> float:
+    return _s_num(t.get("accruals_for_sale")) - _s_num(t.get("refunds_and_cancellations"))
+
+
+def _build_expenses(t: Dict[str, Any]) -> float:
+    sc = _s_num(t.get("sale_commission"))
+    pad = _s_num(t.get("processing_and_delivery"))
+    rfc = _s_num(t.get("refunds_and_cancellations"))
+    sa = _s_num(t.get("services_amount"))
+    oa = _s_num(t.get("others_amount"))
+
+    commission = abs(sc)
+    delivery = abs(pad)
+    returns = -rfc if rfc < 0 else 0
+    other = abs(sa) + abs(oa)
+    return commission + delivery + returns + other
+
+
+def _accrued_from_totals(t: Dict[str, Any]) -> float:
+    return (
+        _s_num(t.get("accruals_for_sale"))
+        + _s_num(t.get("sale_commission"))
+        + _s_num(t.get("processing_and_delivery"))
+        + _s_num(t.get("refunds_and_cancellations"))
+        + _s_num(t.get("services_amount"))
+        + _s_num(t.get("others_amount"))
+        + _s_num(t.get("compensation_amount"))
     )
 
-    return msg
+
+async def get_finance_today_text() -> str:
+    """
+    Возвращает готовый текст для Telegram по финансам за текущий день (МСК).
+    """
+    rng = msk_day_range()
+
+    payload = {
+        "date": {
+            "from": rng["since"],
+            "to": rng["to"],
+        },
+        "transaction_type": "all",
+    }
+
+    data = await ozon_raw_post("/v3/finance/transaction/totals", payload)
+    totals = data.get("result") or {}
+
+    accrued = _accrued_from_totals(totals)
+    sales = _sales_from_totals(totals)
+    expenses = _build_expenses(totals)
+    profit = accrued - expenses
+
+    text = (
+        f"🏦 Финансы за сегодня\n"
+        f"{rng['pretty']}\n\n"
+        f"Начислено: {_rub0(accrued)}\n"
+        f"Продажи:  {_rub0(sales)}\n"
+        f"Расходы:  {_rub0(expenses)}\n"
+        f"Прибыль (грубо, до себестоимости): {_rub0(profit)}"
+    )
+
+    return text
