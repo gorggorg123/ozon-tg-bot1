@@ -1,133 +1,151 @@
 import asyncio
+import contextlib
 import logging
 import os
 
 from fastapi import FastAPI
+
 from aiogram import Bot, Dispatcher, F
-from aiogram.filters import CommandStart, Command
-from aiogram.types import Message
 from aiogram.client.default import DefaultBotProperties
-from dotenv import load_dotenv
+from aiogram.enums import ParseMode
+from aiogram.filters import CommandStart, Command
+from aiogram.types import (
+    Message,
+    CallbackQuery,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+)
 
 from botapp.finance import get_finance_today_text
 from botapp.orders import get_orders_today_text
-from botapp.keyboards import main_menu_keyboard, NOT_IMPLEMENTED_TEXT
 
-# ---------- Логирование ----------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
-logger = logging.getLogger(__name__)
-
-# ---------- ENV ----------
-load_dotenv()
+logger = logging.getLogger("main")
 
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
 if not TG_BOT_TOKEN:
-    raise RuntimeError("Не задан TG_BOT_TOKEN в переменных окружения")
+    raise RuntimeError("TG_BOT_TOKEN is not set")
 
-
-# ---------- Aiogram ----------
 bot = Bot(
     token=TG_BOT_TOKEN,
-    default=DefaultBotProperties(parse_mode="HTML"),
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML),
 )
 dp = Dispatcher()
-
-# ---------- FastAPI ----------
-app = FastAPI(title="Ozon Seller Telegram Bot")
+app = FastAPI()
 
 
-@app.get("/")
-async def root():
-    return {"status": "ok", "message": "Ozon Seller bot is running"}
+# ========= КЛАВИАТУРА =========
+def main_menu_inline_kb() -> InlineKeyboardMarkup:
+    """
+    Главное меню — ИНЛАЙН-клавиатура (кнопки под сообщением).
+    """
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🏦 Финансы за сегодня", callback_data="fin_today")],
+            [InlineKeyboardButton(text="📦 Заказы за сегодня", callback_data="orders_today")],
+            [InlineKeyboardButton(text="📂 Аккаунт Ozon", callback_data="account_info")],
+            [InlineKeyboardButton(text="📊 Полная аналитика", callback_data="full_analytics")],
+        ]
+    )
 
 
-@app.get("/health")
-async def health():
-    return {"status": "ok"}
-
-
-# ---------- Хендлеры бота ----------
-
+# ========= ХЕНДЛЕРЫ /start и команды =========
 @dp.message(CommandStart())
 async def cmd_start(message: Message) -> None:
     text = (
-        "Привет! 😊 Я бот для аналитики Ozon Seller (Python + aiogram + FastAPI).\n\n"
-        "Сейчас умею:\n"
-        "• /fin_today — финансы за сегодня\n"
-        "• /orders_today — FBO-заказы за сегодня\n\n"
-        "Можно пользоваться кнопками в меню."
+        "Этот раздел ещё в разработке.\n\n"
+        "Сейчас доступны:\n"
+        "• 🏦 Финансы за сегодня\n"
+        "• 📦 Заказы за сегодня"
     )
-    await message.answer(text, reply_markup=main_menu_keyboard)
+    await message.answer(text, reply_markup=main_menu_inline_kb())
 
 
 @dp.message(Command("fin_today"))
-@dp.message(F.text == "🏦 Финансы за сегодня")
 async def cmd_fin_today(message: Message) -> None:
     try:
         text = await get_finance_today_text()
-        await message.answer(text)
     except Exception as e:
-        logger.exception("Ошибка при получении финансов: %s", e)
-        await message.answer(
-            "⚠️ Не удалось получить финансы за сегодня.\n"
-            f"Ошибка: {e}"
-        )
+        logger.exception("Ошибка при получении финансов за сегодня: %s", e)
+        text = f"⚠️ Не удалось получить финансы за сегодня.\nОшибка: {e}"
+    await message.answer(text)
 
 
 @dp.message(Command("orders_today"))
-@dp.message(F.text == "📦 Заказы за сегодня")
 async def cmd_orders_today(message: Message) -> None:
     try:
         text = await get_orders_today_text()
-        await message.answer(text)
     except Exception as e:
         logger.exception("Ошибка при получении заказов: %s", e)
-        await message.answer(
-            "⚠️ Не удалось получить заказы за сегодня.\n"
-            f"Ошибка: {e}"
-        )
+        text = f"⚠️ Не удалось получить заказы за сегодня.\nОшибка: {e}"
+    await message.answer(text)
 
 
-@dp.message(F.text.in_(
-    ["📂 Аккаунт Ozon", "📊 Полная аналитика", "📦 FBO", "⭐ Отзывы", "🧠 ИИ"]
-))
-async def cmd_not_implemented(message: Message) -> None:
-    await message.answer(NOT_IMPLEMENTED_TEXT)
+# ========= CALLBACK-и от инлайн-кнопок =========
+@dp.callback_query(F.data == "fin_today")
+async def cb_fin_today(callback: CallbackQuery) -> None:
+    await callback.answer()
+    try:
+        text = await get_finance_today_text()
+    except Exception as e:
+        logger.exception("Ошибка при получении финансов за сегодня: %s", e)
+        text = f"⚠️ Не удалось получить финансы за сегодня.\nОшибка: {e}"
+    await callback.message.answer(text)
 
 
-# ---------- Запуск бота при старте FastAPI ----------
+@dp.callback_query(F.data == "orders_today")
+async def cb_orders_today(callback: CallbackQuery) -> None:
+    await callback.answer()
+    try:
+        text = await get_orders_today_text()
+    except Exception as e:
+        logger.exception("Ошибка при получении заказов: %s", e)
+        text = f"⚠️ Не удалось получить заказы за сегодня.\nОшибка: {e}"
+    await callback.message.answer(text)
+
+
+@dp.callback_query(F.data == "account_info")
+async def cb_account_info(callback: CallbackQuery) -> None:
+    await callback.answer()
+    await callback.message.answer("🗂 Раздел «Аккаунт Ozon» ещё в разработке.")
+
+
+@dp.callback_query(F.data == "full_analytics")
+async def cb_full_analytics(callback: CallbackQuery) -> None:
+    await callback.answer()
+    await callback.message.answer("📊 Раздел «Полная аналитика» ещё в разработке.")
+
+
+# ========= FASTAPI + запуск бота на Render =========
+@app.get("/")
+async def root():
+    return {"status": "ok", "message": "Ozon TG bot is running"}
+
+
+_bot_task: asyncio.Task | None = None
+
 
 async def _run_bot() -> None:
-    """
-    Запускает long polling. Вызовется из FastAPI startup.
-    """
     logger.info("Запускаю Telegram-бота (long polling)…")
     await dp.start_polling(bot)
 
 
 @app.on_event("startup")
 async def on_startup() -> None:
-    """
-    Render запускает uvicorn main:app → FastAPI вызывает этот хук.
-    При старте:
-      1) Отключаем webhook у бота (на всякий случай).
-      2) Запускаем long polling.
-    """
-    # Убираем активный webhook, иначе getUpdates (long polling) не работает
-    try:
-        await bot.delete_webhook(drop_pending_updates=True)
-        logger.info("Webhook удалён (delete_webhook). Переключаемся на long polling.")
-    except Exception as e:
-        logger.warning("Не удалось удалить webhook: %s", e)
-
-    asyncio.create_task(_run_bot())
+    global _bot_task
+    loop = asyncio.get_event_loop()
+    _bot_task = loop.create_task(_run_bot())
     logger.info("Startup completed: bot task created.")
 
 
-# Локальный запуск (для отладки на компе)
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=10000, reload=True)
+@app.on_event("shutdown")
+async def on_shutdown() -> None:
+    global _bot_task
+    if _bot_task:
+        _bot_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await _bot_task
+    logger.info("Shutdown completed.")
