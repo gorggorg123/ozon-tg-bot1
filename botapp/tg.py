@@ -1,27 +1,27 @@
-import json
+# botapp/tg.py
 import os
-from typing import Any, Dict, Optional
+import json
 
 import httpx
 from fastapi import APIRouter, Request
 
-from .ozon_client import (
-    build_fin_today_message,
-    build_orders_today_message,
-    build_seller_info_message,
-)
+from .finance import build_fin_today_message
+from .orders import build_orders_today_message
+from .ozon_client import build_seller_info_message
 
 router = APIRouter()
 
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
 
 if not TG_BOT_TOKEN:
-    print("⚠️ TG_BOT_TOKEN не задан. Бот не сможет отправлять сообщения в Telegram.")
+    print("⚠️ TG_BOT_TOKEN не задан. Бот не сможет работать с Telegram.")
 
-TG_API_URL = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/" if TG_BOT_TOKEN else None
+TG_API_URL = (
+    f"https://api.telegram.org/bot{TG_BOT_TOKEN}/" if TG_BOT_TOKEN else None
+)
 
-# Инлайн-клавиатура главного меню
-KB_ROOT_INLINE: Dict[str, Any] = {
+# Главное меню — ИНЛАЙН-клавиатура
+KB_ROOT = {
     "inline_keyboard": [
         [{"text": "📊 Финансы сегодня", "callback_data": "finance_today"}],
         [{"text": "📦 Заказы за сегодня", "callback_data": "orders_today"}],
@@ -34,9 +34,9 @@ KB_ROOT_INLINE: Dict[str, Any] = {
 }
 
 
-async def tg_call(method: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+async def tg_call(method: str, payload: dict) -> dict:
     """
-    Вызов Telegram Bot API.
+    Вызов метода Telegram Bot API.
     Ошибки логируем, но не роняем сервер.
     """
     if not TG_API_URL:
@@ -52,20 +52,17 @@ async def tg_call(method: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         return {"ok": False, "status_code": resp.status_code}
 
     if not data.get("ok"):
+        # Не поднимаем исключение, чтобы не было 500
         print(f"Telegram {method} error: {data}")
 
     return data
 
 
-async def send_message(
-    chat_id: int,
-    text: str,
-    reply_markup: Optional[Dict[str, Any]] = None,
-) -> None:
-    payload: Dict[str, Any] = {
+async def send_message(chat_id: int, text: str, reply_markup: dict | None = None) -> None:
+    payload: dict = {
         "chat_id": chat_id,
         "text": text,
-        # parse_mode убрали, чтобы не было проблем с Markdown
+        "parse_mode": "Markdown",
     }
     if reply_markup is not None:
         payload["reply_markup"] = reply_markup
@@ -73,177 +70,116 @@ async def send_message(
     await tg_call("sendMessage", payload)
 
 
-async def answer_callback_query(callback_query_id: str) -> None:
-    """Просто отвечаем callback'у, чтобы не висела 'часовая' иконка."""
-    await tg_call("answerCallbackQuery", {"callback_query_id": callback_query_id})
+async def edit_message_text(
+    chat_id: int,
+    message_id: int,
+    text: str,
+    reply_markup: dict | None = None,
+) -> None:
+    payload: dict = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "text": text,
+        "parse_mode": "Markdown",
+    }
+    if reply_markup is not None:
+        payload["reply_markup"] = reply_markup
+
+    await tg_call("editMessageText", payload)
 
 
 @router.post("/tg")
 async def telegram_webhook(request: Request):
     """
-    Единственная точка входа для вебхука.
-
-    Обрабатываем:
-      - обычные сообщения (message) -> /start, "Меню"
-      - callback_query -> кнопки инлайн-клавиатуры
+    Единственная точка входа для вебхука Telegram.
+    Обрабатываем и message, и callback_query.
     """
     update = await request.json()
     print("Telegram update:", update)
 
-    # --------- callback_query (инлайн-кнопки) ---------
-    if "callback_query" in update:
-        cb = update["callback_query"]
-        data = cb.get("data") or ""
-        from_user = cb.get("from") or {}
-        message = cb.get("message") or {}
+    # Обычное сообщение (/start и т.п.)
+    message = update.get("message") or update.get("edited_message")
+    if message:
         chat = message.get("chat") or {}
         chat_id = chat.get("id")
-        cb_id = cb.get("id")
-
-        if cb_id:
-            await answer_callback_query(cb_id)
-
         if chat_id is None:
             return {"ok": True}
 
-        # Маршрутизация по data
-        if data == "finance_today":
-            try:
-                msg = await build_fin_today_message()
-            except Exception as e:
-                msg = (
-                    "⚠️ Не удалось получить финансы за сегодня.\n"
-                    f"Ошибка: {e!s}"
-                )
-            await send_message(chat_id, msg, reply_markup=KB_ROOT_INLINE)
-            return {"ok": True}
+        text = message.get("text") or ""
 
-        if data == "orders_today":
-            try:
-                msg = await build_orders_today_message()
-            except Exception as e:
-                msg = (
-                    "⚠️ Не удалось получить заказы за сегодня.\n"
-                    f"Ошибка: {e!s}"
-                )
-            await send_message(chat_id, msg, reply_markup=KB_ROOT_INLINE)
-            return {"ok": True}
-
-        if data == "seller_info":
-            try:
-                msg = await build_seller_info_message()
-            except Exception as e:
-                msg = (
-                    "⚠️ Не удалось получить данные об аккаунте Ozon.\n"
-                    f"Ошибка: {e!s}"
-                )
-            await send_message(chat_id, msg, reply_markup=KB_ROOT_INLINE)
-            return {"ok": True}
-
-        # Заглушки на остальные разделы
-        if data == "analytics_full":
+        if text.startswith("/start"):
             await send_message(
                 chat_id,
-                "Раздел «📊 Полная аналитика» пока не реализован.\n"
-                "Сейчас доступны:\n"
-                "• 📊 Финансы сегодня\n"
-                "• 📦 Заказы за сегодня\n"
-                "• 🧾 Аккаунт Ozon",
-                reply_markup=KB_ROOT_INLINE,
+                "Выберите раздел 👇",
+                reply_markup=KB_ROOT,
             )
             return {"ok": True}
 
-        if data == "fbo":
-            await send_message(
-                chat_id,
-                "Раздел «📦 FBO» пока не реализован.\n"
-                "План: детализация остатков и заказов по складам FBO.",
-                reply_markup=KB_ROOT_INLINE,
-            )
-            return {"ok": True}
-
-        if data == "reviews":
-            await send_message(
-                chat_id,
-                "Раздел «⭐ Отзывы» пока не реализован.\n"
-                "План: последние отзывы, рейтинг по SKU, быстрые ответы.",
-                reply_markup=KB_ROOT_INLINE,
-            )
-            return {"ok": True}
-
-        if data == "ai":
-            await send_message(
-                chat_id,
-                "Раздел «🧠 ИИ» пока не реализован.\n"
-                "План: брифинг по аккаунту, прогноз выручки, Q&A.",
-                reply_markup=KB_ROOT_INLINE,
-            )
-            return {"ok": True}
-
-        # На всякий случай
+        # На всё остальное — просто показываем меню
         await send_message(
             chat_id,
-            "Неизвестная команда кнопки.",
-            reply_markup=KB_ROOT_INLINE,
+            "Выберите раздел 👇",
+            reply_markup=KB_ROOT,
         )
         return {"ok": True}
 
-    # --------- обычные сообщения (message) ---------
-    message = update.get("message") or update.get("edited_message")
-    if not message:
-        # Например, service message — просто подтверждаем
-        return {"ok": True}
+    # Callback-запрос от инлайн-клавиатуры
+    callback = update.get("callback_query")
+    if callback:
+        data = callback.get("data") or ""
+        cb_message = callback.get("message") or {}
+        chat = cb_message.get("chat") or {}
+        chat_id = chat.get("id")
+        message_id = cb_message.get("message_id")
 
-    chat = message.get("chat") or {}
-    chat_id = chat.get("id")
-    if chat_id is None:
-        return {"ok": True}
-
-    text = message.get("text") or ""
-
-    # /start или просто "Меню"
-    if text.startswith("/start") or text == "Меню":
-        await send_message(chat_id, "Выберите раздел 👇", reply_markup=KB_ROOT_INLINE)
-        return {"ok": True}
-
-    # Команды текстом, если вдруг захочешь вызывать без кнопок
-    if text == "/finance_today":
-        try:
-            msg = await build_fin_today_message()
-        except Exception as e:
-            msg = (
-                "⚠️ Не удалось получить финансы за сегодня.\n"
-                f"Ошибка: {e!s}"
+        if chat_id is None or message_id is None:
+            # Всё равно ответим на callback, чтобы Telegram не крутил «часики»
+            await tg_call(
+                "answerCallbackQuery",
+                {"callback_query_id": callback.get("id")},
             )
-        await send_message(chat_id, msg, reply_markup=KB_ROOT_INLINE)
+            return {"ok": True}
+
+        # По умолчанию
+        text = "Этот раздел пока не реализован."
+
+        if data == "finance_today":
+            try:
+                text = await build_fin_today_message()
+            except Exception as e:
+                text = (
+                    "⚠️ Не удалось получить финансы за сегодня.\n"
+                    f"Ошибка: `{e!s}`"
+                )
+
+        elif data == "orders_today":
+            try:
+                text = await build_orders_today_message()
+            except Exception as e:
+                text = (
+                    "⚠️ Не удалось получить заказы за сегодня.\n"
+                    f"Ошибка: `{e!s}`"
+                )
+
+        elif data == "seller_info":
+            text = await build_seller_info_message()
+
+        # Остальные callback_data пока заглушки,
+        # но сообщение меню всё равно обновляем
+        await edit_message_text(
+            chat_id,
+            message_id,
+            text,
+            reply_markup=KB_ROOT,
+        )
+
+        # Обязательно ответить на callback
+        await tg_call(
+            "answerCallbackQuery",
+            {"callback_query_id": callback.get("id")},
+        )
+
         return {"ok": True}
 
-    if text == "/orders_today":
-        try:
-            msg = await build_orders_today_message()
-        except Exception as e:
-            msg = (
-                "⚠️ Не удалось получить заказы за сегодня.\n"
-                f"Ошибка: {e!s}"
-            )
-        await send_message(chat_id, msg, reply_markup=KB_ROOT_INLINE)
-        return {"ok": True}
-
-    if text == "/seller_info":
-        try:
-            msg = await build_seller_info_message()
-        except Exception as e:
-            msg = (
-                "⚠️ Не удалось получить данные об аккаунте Ozon.\n"
-                f"Ошибка: {e!s}"
-            )
-        await send_message(chat_id, msg, reply_markup=KB_ROOT_INLINE)
-        return {"ok": True}
-
-    # Всё остальное — просто говорим про меню
-    await send_message(
-        chat_id,
-        "Не понимаю команду.\nНажмите /start или кнопку «Меню», чтобы увидеть разделы.",
-        reply_markup=KB_ROOT_INLINE,
-    )
+    # Если ничего не распознали — просто ок
     return {"ok": True}
