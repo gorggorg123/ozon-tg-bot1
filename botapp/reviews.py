@@ -21,6 +21,10 @@ _product_name_cache: dict[str, str] = {}
 _review_answered_cache: dict[int, set[str]] = {}
 _sessions: dict[int, "ReviewSession"] = {}
 
+_product_name_cache: dict[str, str] = {}
+_review_answered_cache: set[str] = set()
+_sessions: dict[int, "ReviewSession"] = {}
+
 
 @dataclass
 class ReviewCard:
@@ -216,6 +220,25 @@ async def _resolve_product_names(cards: List[ReviewCard], client: OzonClient) ->
             _product_name_cache[pid] = title
         else:
             logger.warning("Product name not resolved for %s", pid)
+
+    for card in cards:
+        if card.product_id and not card.product_name:
+            card.product_name = _product_name_cache.get(card.product_id) or card.product_name
+
+
+async def _resolve_product_names(cards: List[ReviewCard], client: OzonClient) -> None:
+    missing_ids = [c.product_id for c in cards if c.product_id and not c.product_name]
+    unique_ids = [pid for pid in dict.fromkeys(missing_ids) if pid]
+    for pid in unique_ids:
+        if pid in _product_name_cache:
+            continue
+        try:
+            title = await client.get_product_name(pid)
+        except Exception:
+            logger.exception("Failed to fetch product name for %s", pid)
+            title = None
+        if title:
+            _product_name_cache[pid] = title
 
     for card in cards:
         if card.product_id and not card.product_name:
