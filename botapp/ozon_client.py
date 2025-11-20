@@ -373,6 +373,58 @@ class OzonClient:
         )
         return reviews[:max_reviews]
 
+    async def get_product_name(self, product_id: str) -> str | None:
+        """Получить название товара по ``product_id`` через /v2/product/info.
+
+        В логах была серия 404 ``page not found``. Пробуем строго задокументированный
+        payload (product_id в теле, без лишних полей) и резервно обращаемся к v1
+        эндпоинту. Любые ошибки логируем и возвращаем None, чтобы карточка могла
+        отобразить fallback без падения.
+        """
+
+        if not product_id:
+            return None
+
+        numeric_id: int | None = None
+        if str(product_id).isdigit():
+            try:
+                numeric_id = int(product_id)
+            except Exception:
+                numeric_id = None
+
+        payload: dict[str, int | str] = {}
+        if numeric_id is not None:
+            payload["product_id"] = numeric_id
+        else:
+            payload["product_id"] = product_id
+
+        paths = ("/v2/product/info", "/v1/product/info")
+        for path in paths:
+            try:
+                data = await self.post(path, payload)
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 404:
+                    logger.warning("Product %s not found on Ozon (%s): %s", product_id, path, exc)
+                    continue
+                logger.exception("Product info failed for %s on %s", product_id, path)
+                continue
+            except Exception:
+                logger.exception("Product info failed for %s on %s", product_id, path)
+                continue
+
+            if not isinstance(data, dict):
+                logger.error("Unexpected product info response for %s at %s: %r", product_id, path, data)
+                continue
+
+            res = data.get("result") if isinstance(data.get("result"), dict) else data
+            if isinstance(res, dict):
+                name = res.get("name") or res.get("title") or res.get("offer_id")
+                if name:
+                    return str(name)
+            logger.warning("Product name missing for %s at %s: %r", product_id, path, res)
+
+        return None
+
     # back-compat
     get_account_info = get_seller_info
 
