@@ -147,6 +147,54 @@ async def get_orders_today_text(client: OzonClient | None = None) -> str:
         "amount_without_cancel", 0
     )
 
+    revenue = 0.0
+    product_counter: Counter[str] = Counter()
+    product_names: dict[str, str] = {}
+
+    for p in safe_postings:
+        products = p.get("products") or []
+        for prod in products:
+            qty = int(s_num(prod.get("quantity")))
+            if qty <= 0:
+                continue
+            offer = (
+                prod.get("offer_id")
+                or prod.get("sku")
+                or prod.get("product_id")
+                or prod.get("name")
+                or "?"
+            )
+            name = (
+                prod.get("name")
+                or prod.get("product_name")
+                or product_names.get(str(offer))
+                or ""
+            )
+            product_counter[str(offer)] += qty
+            if name:
+                product_names.setdefault(str(offer), str(name))
+
+        if p.get("status") == "delivered":
+            fin = p.get("financial_data") or {}
+            fin_products = fin.get("products") or []
+            for fprod in fin_products:
+                revenue += s_num(
+                    fprod.get("payout")
+                    or fprod.get("client_price")
+                    or fprod.get("price")
+                    or 0
+                )
+
+    avg_check = revenue / delivered if delivered else 0
+    unique_items = len(product_counter)
+
+    top3_lines: list[str] = []
+    if product_counter:
+        top3 = product_counter.most_common(3)
+        for idx, (offer, qty) in enumerate(top3, start=1):
+            name = product_names.get(offer, offer)
+            top3_lines.append(f"{idx}) {name} — {fmt_int(qty)} шт")
+
     lines = [
         "📦 FBO • Сводка",
         pretty_today,

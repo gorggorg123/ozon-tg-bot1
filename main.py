@@ -48,6 +48,7 @@ router = Router()
 _last_reviews_period = "today"
 
 
+
 @router.message(CommandStart())
 async def cmd_start(message: Message) -> None:
     text = "Добро пожаловать! Выберите раздел в меню или используйте команды."
