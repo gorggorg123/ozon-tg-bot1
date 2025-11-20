@@ -28,7 +28,12 @@ async def generate_review_reply(
     rating: int | None,
     language: str = "ru",
 ) -> str:
-    """Return a short, friendly draft reply to a customer review."""
+    """Return a short, friendly draft reply to a customer review.
+
+    If OpenAI rejects the request (e.g. no access to the default model), we log a
+    warning and fall back to a simple canned reply instead of bubbling the error
+    to Telegram users.
+    """
 
     if not _OPENAI_API_KEY:
         logger.warning("OPENAI_API_KEY is missing; cannot generate AI reply")
@@ -46,10 +51,13 @@ async def generate_review_reply(
         user_parts.append(f"Оценка: {rating}★")
 
     message = "\n".join(user_parts)
+    # Разрешаем задать модель через окружение; по умолчанию используем более
+    # доступную gpt-4o-mini, чтобы избежать 403 model_not_found, как на Render.
+    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
     try:
         resp = await client.chat.completions.create(
-            model="gpt-4.1-mini",
+            model=model,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": message},
@@ -57,9 +65,9 @@ async def generate_review_reply(
             max_tokens=300,
             temperature=0.6,
         )
-    except Exception:
-        logger.exception("OpenAI call failed")
-        raise
+    except Exception as exc:
+        logger.warning("OpenAI call failed (%s); using canned reply", exc)
+        return "Спасибо за ваш отзыв! Мы уже передали его команде."  # fallback
 
     choice = resp.choices[0].message.content if resp.choices else None
     return choice.strip() if choice else "Спасибо за ваш отзыв!"
