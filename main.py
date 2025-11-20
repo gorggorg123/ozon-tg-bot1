@@ -13,22 +13,16 @@ from dotenv import load_dotenv
 
 from botapp.account import get_account_info_text
 from botapp.finance import get_finance_today_text
-from botapp.keyboards import (
-    MenuCallbackData,
-    account_keyboard,
-    fbo_menu_keyboard,
-    main_menu_keyboard,
-    reviews_navigation_keyboard,
-    reviews_periods_keyboard,
-)
 from botapp.orders import get_orders_today_text
-from botapp.ozon_client import get_client
 from botapp.reviews import (
-    get_latest_review,
     get_reviews_menu_text,
+    get_latest_review,
     get_reviews_period_view,
     shift_reviews_view,
 )
+from botapp.tg import main_menu_kb
+from botapp.keyboards import reviews_periods_keyboard, fbo_keyboard, reviews_navigation_keyboard
+from botapp.ozon_client import get_client
 from botapp.reviews_ai import draft_reply
 
 load_dotenv()
@@ -54,46 +48,119 @@ _last_reviews_period = "today"
 
 @router.message(CommandStart())
 async def cmd_start(message: Message) -> None:
-    text = "Добро пожаловать! Выберите раздел в меню."
-    await message.answer(text, reply_markup=main_menu_keyboard())
+    text = "Добро пожаловать! Выберите раздел в меню или используйте команды."
+    await message.answer(text, reply_markup=main_menu_kb())
 
 
 @router.message(Command("fin_today"))
-@router.message(F.text == "📊 Финансы за сегодня")
 async def cmd_fin_today(message: Message) -> None:
     text = await get_finance_today_text()
-    await message.answer(text, reply_markup=main_menu_keyboard())
+    await message.answer(text)
 
 
 @router.message(Command("account"))
-@router.message(F.text == "👤 Аккаунт Ozon")
 async def cmd_account(message: Message) -> None:
     text = await get_account_info_text()
-    await message.answer(text, reply_markup=account_keyboard())
+    await message.answer(text)
 
 
-@router.message(Command("fbo"))
-@router.message(F.text == "📦 FBO")
-async def cmd_fbo(message: Message) -> None:
+@router.message(Command("reviews_today"))
+async def cmd_reviews_today(message: Message) -> None:
+    global _last_reviews_period
+    _last_reviews_period = "today"
+    view = await get_reviews_period_view(message.from_user.id, "today")
+    await message.answer(view.text, reply_markup=reviews_navigation_keyboard(view.has_prev, view.has_next))
+
+
+@router.message(Command("reviews_week"))
+async def cmd_reviews_week(message: Message) -> None:
+    global _last_reviews_period
+    _last_reviews_period = "week"
+    view = await get_reviews_period_view(message.from_user.id, "week")
+    await message.answer(view.text, reply_markup=reviews_navigation_keyboard(view.has_prev, view.has_next))
+
+
+@router.message(Command("reviews_month"))
+async def cmd_reviews_month(message: Message) -> None:
+    global _last_reviews_period
+    _last_reviews_period = "month"
+    view = await get_reviews_period_view(message.from_user.id, "month")
+    await message.answer(view.text, reply_markup=reviews_navigation_keyboard(view.has_prev, view.has_next))
+
+
+@router.callback_query(F.data == "fin_today")
+async def cb_fin_today(callback: CallbackQuery) -> None:
+    await callback.answer()  # закрываем часы
+    text = await get_finance_today_text()
+    await callback.message.answer(text)
+
+
+@router.callback_query(F.data == "fbo_menu")
+async def cb_fbo_menu(callback: CallbackQuery) -> None:
+    await callback.answer()
     text = await get_orders_today_text()
-    await message.answer(text, reply_markup=fbo_menu_keyboard())
+    await callback.message.answer(text, reply_markup=fbo_keyboard())
 
 
-@router.message(Command("reviews"))
-@router.message(F.text == "⭐ Отзывы")
-async def cmd_reviews(message: Message) -> None:
+@router.callback_query(F.data == "fbo_summary")
+async def cb_fbo_summary(callback: CallbackQuery) -> None:
+    await callback.answer()
+    text = await get_orders_today_text()
+    try:
+        await callback.message.edit_text(text, reply_markup=fbo_keyboard())
+    except TelegramBadRequest:
+        await callback.message.answer(text, reply_markup=fbo_keyboard())
+
+
+@router.callback_query(F.data == "fbo_month")
+async def cb_fbo_month(callback: CallbackQuery) -> None:
+    await callback.answer("Сводка за месяц скоро")
+    await callback.message.answer(
+        "Месячная сводка пока в разработке, покажем как только будет готово.",
+        reply_markup=fbo_keyboard(),
+    )
+
+
+@router.callback_query(F.data == "fbo_filter")
+async def cb_fbo_filter(callback: CallbackQuery) -> None:
+    await callback.answer("Фильтр скоро")
+
+
+@router.callback_query(F.data == "to_menu")
+async def cb_to_menu(callback: CallbackQuery) -> None:
+    await callback.answer()
+    await callback.message.answer("Главное меню", reply_markup=main_menu_kb())
+
+
+@router.callback_query(F.data == "account_info")
+async def cb_account_info(callback: CallbackQuery) -> None:
+    await callback.answer()
+    text = await get_account_info_text()
+    await callback.message.answer(text)
+
+
+@router.callback_query(F.data == "full_analytics")
+async def cb_full_analytics(callback: CallbackQuery) -> None:
+    await callback.answer()
+    # пока заглушка, позже допилим по Ульянову
+    await callback.message.answer("📊 Полная аналитика скоро будет доступна.")
+
+
+@router.callback_query(F.data == "reviews")
+async def cb_reviews(callback: CallbackQuery) -> None:
+    await callback.answer()
     text = await get_reviews_menu_text()
-    await message.answer(text, reply_markup=reviews_periods_keyboard())
+    await callback.message.answer(text, reply_markup=reviews_periods_keyboard())
 
 
-async def _send_reviews_period(callback: CallbackQuery, period_key: str) -> None:
-    """Общий помощник для смены периода отзывов."""
-
+async def _send_reviews_period(
+    callback: CallbackQuery, period_key: str
+) -> None:
     global _last_reviews_period
     _last_reviews_period = period_key
+    await callback.answer()
     view = await get_reviews_period_view(callback.from_user.id, period_key)
-    markup = reviews_navigation_keyboard(period_key, view.has_prev, view.has_next)
-
+    markup = reviews_navigation_keyboard(view.has_prev, view.has_next)
     try:
         if callback.message.text == view.text:
             await callback.answer("Этот период уже выбран")
@@ -106,87 +173,56 @@ async def _send_reviews_period(callback: CallbackQuery, period_key: str) -> None
             await callback.message.answer(view.text, reply_markup=markup)
 
 
-@router.callback_query(MenuCallbackData.filter(F.section == "home"))
-async def cb_home(callback: CallbackQuery, callback_data: MenuCallbackData) -> None:
+@router.callback_query(F.data == "reviews_today")
+async def cb_reviews_today(callback: CallbackQuery) -> None:
+    await _send_reviews_period(callback, "today")
+
+
+@router.callback_query(F.data == "reviews_week")
+async def cb_reviews_week(callback: CallbackQuery) -> None:
+    await _send_reviews_period(callback, "week")
+
+
+@router.callback_query(F.data == "reviews_month")
+async def cb_reviews_month(callback: CallbackQuery) -> None:
+    await _send_reviews_period(callback, "month")
+
+
+@router.callback_query(F.data.in_({"reviews_prev", "reviews_next"}))
+async def cb_reviews_pagination(callback: CallbackQuery) -> None:
     await callback.answer()
-    await callback.message.answer("Главное меню", reply_markup=main_menu_keyboard())
+    step = -1 if callback.data == "reviews_prev" else 1
+    view = await shift_reviews_view(callback.from_user.id, step)
+    if not view:
+        await callback.message.answer("Выберите период отзывов", reply_markup=reviews_periods_keyboard())
+        return
+    markup = reviews_navigation_keyboard(view.has_prev, view.has_next)
+    try:
+        await callback.message.edit_text(view.text, reply_markup=markup)
+    except TelegramBadRequest as exc:
+        if "message is not modified" in str(exc):
+            await callback.answer("Дальше отзывов нет")
+        else:
+            await callback.message.answer(view.text, reply_markup=markup)
 
 
-@router.callback_query(MenuCallbackData.filter(F.section == "fbo"))
-async def cb_fbo(callback: CallbackQuery, callback_data: MenuCallbackData) -> None:
+@router.callback_query(F.data == "reviews_ai_draft")
+async def cb_reviews_ai_draft(callback: CallbackQuery) -> None:
     await callback.answer()
-    action = callback_data.action
-    if action == "summary":
-        text = await get_orders_today_text()
-        try:
-            await callback.message.edit_text(text, reply_markup=fbo_menu_keyboard())
-        except TelegramBadRequest:
-            await callback.message.answer(text, reply_markup=fbo_menu_keyboard())
-    elif action == "month":
-        await callback.message.answer(
-            "Месячная сводка пока в разработке, покажем как только будет готово.",
-            reply_markup=fbo_menu_keyboard(),
-        )
-    elif action == "filter":
-        await callback.message.answer("Фильтр скоро", reply_markup=fbo_menu_keyboard())
+    review = await get_latest_review(_last_reviews_period, callback.from_user.id)
+    if not review:
+        await callback.message.answer("Свежих отзывов в выбранном периоде нет.")
+        return
+
+    reply = await draft_reply(review)
+    await callback.message.answer(f"💡 Черновик ответа:\n{reply}")
 
 
-@router.callback_query(MenuCallbackData.filter(F.section == "account"))
-async def cb_account(callback: CallbackQuery, callback_data: MenuCallbackData) -> None:
+@router.callback_query(F.data == "reviews_back")
+async def cb_reviews_back(callback: CallbackQuery) -> None:
     await callback.answer()
-    text = await get_account_info_text()
-    await callback.message.answer(text, reply_markup=account_keyboard())
-
-
-@router.callback_query(MenuCallbackData.filter(F.section == "reviews"))
-async def cb_reviews(callback: CallbackQuery, callback_data: MenuCallbackData) -> None:
-    action = callback_data.action
-    if action == "period":
-        await callback.answer()
-        period_key = callback_data.extra or "today"
-        await _send_reviews_period(callback, period_key)
-        return
-
-    if action in {"nav_prev", "nav_next"}:
-        await callback.answer()
-        step = -1 if action == "nav_prev" else 1
-        view = await shift_reviews_view(callback.from_user.id, step)
-        if not view:
-            await callback.message.answer(
-                "Выберите период отзывов", reply_markup=reviews_periods_keyboard()
-            )
-            return
-        markup = reviews_navigation_keyboard(view.period, view.has_prev, view.has_next)
-        try:
-            if callback.message.text == view.text:
-                await callback.answer("Этот отзыв уже показан")
-                return
-            await callback.message.edit_text(view.text, reply_markup=markup)
-        except TelegramBadRequest as exc:
-            if "message is not modified" in str(exc):
-                await callback.answer("Этот отзыв уже показан")
-            else:
-                await callback.message.answer(view.text, reply_markup=markup)
-        return
-
-    if action == "ai":
-        await callback.answer()
-        review = await get_latest_review(_last_reviews_period, callback.from_user.id)
-        if not review:
-            await callback.message.answer("Свежих отзывов в выбранном периоде нет.")
-            return
-        reply = await draft_reply(review)
-        await callback.message.answer(f"💡 Черновик ответа:\n{reply}")
-        return
-
-    if action == "back_periods":
-        await callback.answer()
-        text = await get_reviews_menu_text()
-        try:
-            await callback.message.edit_text(text, reply_markup=reviews_periods_keyboard())
-        except TelegramBadRequest:
-            await callback.message.answer(text, reply_markup=reviews_periods_keyboard())
-        return
+    text = await get_reviews_menu_text()
+    await callback.message.edit_text(text, reply_markup=reviews_periods_keyboard())
 
 
 def build_dispatcher() -> Dispatcher:
