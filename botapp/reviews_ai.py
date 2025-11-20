@@ -4,12 +4,11 @@ from __future__ import annotations
 from typing import Dict
 
 
-def draft_reply(review: Dict[str, str | int]) -> str:
+async def draft_reply(review: Dict[str, str | int]) -> str:
     """
     Заглушка для AI-ответов на отзывы.
 
-    Принимает словарь с полями отзыва и возвращает шаблонный черновик ответа,
-    который позже можно заменить вызовом OpenAI API.
+    TODO: заменить на вызов OpenAI API и подбор персонализированного ответа.
     """
 
     rating = review.get("rating") or review.get("grade")

@@ -10,6 +10,11 @@ from typing import Any, Dict, List, Tuple
 import httpx
 from dotenv import load_dotenv
 
+try:  # ozonapi-async 0.19.x содержит seller_info, 0.1.0 — нет
+    from ozonapi import SellerAPI
+except Exception:  # pragma: no cover - совместимость, если пакет не установлен
+    SellerAPI = None  # type: ignore
+
 logger = logging.getLogger(__name__)
 
 load_dotenv()
@@ -89,6 +94,23 @@ def msk_week_range() -> Tuple[str, str, str]:
     return _iso_z(start_utc), _iso_z(end_utc), pretty
 
 
+def msk_yesterday_range() -> Tuple[str, str, str]:
+    """Диапазон за вчера (МСК)."""
+
+    now_utc = datetime.utcnow()
+    now_msk = now_utc + MSK_SHIFT
+    yesterday = now_msk.date() - timedelta(days=1)
+
+    start_utc = datetime(yesterday.year, yesterday.month, yesterday.day) - MSK_SHIFT
+    end_utc = datetime(yesterday.year, yesterday.month, yesterday.day, 23, 59, 59) - MSK_SHIFT
+
+    pretty = (
+        f"{yesterday.strftime('%d.%m.%Y')} 00:00 — "
+        f"{yesterday.strftime('%d.%m.%Y')} 23:59 (МСК)"
+    )
+    return _iso_z(start_utc), _iso_z(end_utc), pretty
+
+
 def fmt_int(n: float | int) -> str:
     return f"{int(round(n)):,.0f}".replace(",", " ")
 
@@ -129,9 +151,22 @@ class OzonClient:
                 "Accept": "application/json",
             },
         )
+        self._seller_api: SellerAPI | None = None
 
     async def aclose(self) -> None:
         await self._http_client.aclose()
+        if self._seller_api and hasattr(self._seller_api, "close"):
+            try:
+                await self._seller_api.close()  # type: ignore[arg-type]
+            except Exception:
+                pass
+
+    def _get_seller_api(self) -> SellerAPI | None:
+        if SellerAPI is None:
+            return None
+        if self._seller_api is None:
+            self._seller_api = SellerAPI(client_id=self.client_id, api_key=self.api_key)
+        return self._seller_api
 
     async def post(self, path: str, json: Dict[str, Any]) -> Dict[str, Any]:
         # Формируем абсолютный URL вручную, чтобы в логах всегда была явная точка входа
@@ -223,29 +258,26 @@ class OzonClient:
 
     # ---------- Аккаунт ----------
 
-    async def get_company_info(self) -> Dict[str, Any]:
-        paths = ["/v1/company/info", "/v2/company/info"]
-        errors: list[int] = []
+    async def get_account_info(self) -> Dict[str, Any]:
+        """Получить информацию о продавце."""
 
-        for path in paths:
-            for method in (self.post, self.get):
-                try:
-                    data = await method(path, {} if method is self.post else None)
-                except httpx.HTTPStatusError as exc:
-                    status = exc.response.status_code
-                    if status in (404, 405):
-                        errors.append(status)
-                        continue
-                    raise
+        api = self._get_seller_api()
+        if api and hasattr(api, "seller_info"):
+            try:
+                if hasattr(api, "initialize"):
+                    await api.initialize()  # type: ignore[func-returns-value]
+                res = await api.seller_info()  # type: ignore[call-arg]
+                if hasattr(res, "model_dump"):
+                    return res.model_dump()
+                if isinstance(res, dict):
+                    return res
+            except Exception:
+                logger.exception("SellerAPI.seller_info failed, fallback to REST")
 
-                if isinstance(data, dict):
-                    res = data.get("result") or data
-                    if res:
-                        return res
-                logger.error("Unexpected company info response (%s): %r", path, data)
-
-        if errors:
-            logger.warning("Company info endpoint returned %s", errors)
+        data = await self.post("/v1/seller/info", {})
+        if isinstance(data, dict):
+            return data.get("result") or data
+        logger.error("Unexpected seller info response: %r", data)
         return {}
 
     # ---------- Отзывы ----------
@@ -266,9 +298,10 @@ class OzonClient:
         }
 
         page = 1
+        max_pages = 2
         reviews: List[Dict[str, Any]] = []
 
-        while page <= 50:  # защитимся от бесконечной пагинации
+        while page <= max_pages:
             body = {
                 "page": page,
                 "limit": limit,
@@ -294,12 +327,14 @@ class OzonClient:
             page_items = [r for r in arr if isinstance(r, dict)]
             reviews.extend(page_items)
 
-            # прекращаем, если меньше лимита или пусто
             if len(page_items) < limit:
                 break
             page += 1
 
         return reviews
+
+    # back-compat
+    get_company_info = get_account_info
 
 
 _client: OzonClient | None = None
