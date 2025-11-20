@@ -23,6 +23,7 @@ from botapp.keyboards import (
     review_draft_keyboard,
     reviews_navigation_keyboard,
     reviews_root_keyboard,
+    reviews_list_keyboard,
 )
 from botapp.orders import get_orders_today_text
 from botapp.ozon_client import get_client
@@ -34,6 +35,7 @@ from botapp.reviews import (
     get_review_by_id,
     get_review_by_index,
     get_review_view,
+    get_reviews_table,
     mark_review_answered,
     refresh_reviews,
     trim_for_telegram,
@@ -92,6 +94,33 @@ async def send_service_message(
     return sent
 
 
+async def _send_reviews_list(
+    *,
+    user_id: int,
+    category: str,
+    page: int = 0,
+    message: Message | None = None,
+    callback: CallbackQuery | None = None,
+) -> None:
+    text, items, safe_page, total_pages = await get_reviews_table(
+        user_id=user_id, category=category, page=page
+    )
+    markup = reviews_list_keyboard(
+        category=category, page=safe_page, total_pages=total_pages, items=items
+    )
+
+    target = callback.message if callback else message
+    if target is None:
+        return
+
+    try:
+        await target.edit_text(text, reply_markup=markup)
+        remember_service_message(user_id, target.message_id)
+    except TelegramBadRequest:
+        sent = await send_service_message(target.bot, target.chat.id, user_id, text, reply_markup=markup)
+        remember_service_message(user_id, sent.message_id)
+
+
 def remember_service_message(user_id: int, message_id: int) -> None:
     _last_service_messages[user_id] = message_id
 
@@ -100,7 +129,7 @@ def remember_service_message(user_id: int, message_id: int) -> None:
 async def cmd_start(message: Message) -> None:
     text = (
         "Привет! Я помогу быстро смотреть финансы, заказы и отзывы Ozon.\n"
-        "Выберите раздел на клавиатуре ниже."
+        "Выберите раздел через кнопки ниже."
     )
     await send_service_message(
         message.bot,
@@ -112,7 +141,6 @@ async def cmd_start(message: Message) -> None:
 
 
 @router.message(Command("fin_today"))
-@router.message(F.text == "📊 Финансы сегодня")
 async def cmd_fin_today(message: Message) -> None:
     text = await get_finance_today_text()
     await send_service_message(
@@ -125,7 +153,6 @@ async def cmd_fin_today(message: Message) -> None:
 
 
 @router.message(Command("account"))
-@router.message(F.text == "⚙️ Аккаунт Ozon")
 async def cmd_account(message: Message) -> None:
     text = await get_account_info_text()
     await send_service_message(
@@ -138,7 +165,6 @@ async def cmd_account(message: Message) -> None:
 
 
 @router.message(Command("fbo"))
-@router.message(F.text == "📦 FBO за сегодня")
 async def cmd_fbo(message: Message) -> None:
     text = await get_orders_today_text()
     await send_service_message(
@@ -151,21 +177,10 @@ async def cmd_fbo(message: Message) -> None:
 
 
 @router.message(Command("reviews"))
-@router.message(F.text == "⭐ Отзывы")
 async def cmd_reviews(message: Message) -> None:
     user_id = message.from_user.id
-    session = await refresh_reviews(user_id)
-    if not session.unanswered_reviews:
-        await send_service_message(
-            message.bot,
-            message.chat.id,
-            user_id,
-            "Неотвеченных отзывов нет. Можно посмотреть отвеченные или обновить список.",
-            reply_markup=reviews_root_keyboard(),
-        )
-        return
-
-    await _send_review_card(user_id=user_id, category="unanswered", index=0, message=message)
+    await refresh_reviews(user_id)
+    await _send_reviews_list(user_id=user_id, category="all", page=0, message=message)
 
 
 async def _send_review_card(
@@ -250,6 +265,11 @@ async def cb_fbo(callback: CallbackQuery, callback_data: MenuCallbackData) -> No
         )
     elif action == "filter":
         await callback.message.answer("Фильтр скоро", reply_markup=fbo_menu_keyboard())
+    elif action == "open":
+        text = await get_orders_today_text()
+        await callback.message.answer(text, reply_markup=fbo_menu_keyboard())
+    elif action == "home":
+        await callback.message.answer("Главное меню", reply_markup=main_menu_keyboard())
 
 
 @router.callback_query(MenuCallbackData.filter(F.section == "account"))
@@ -259,6 +279,13 @@ async def cb_account(callback: CallbackQuery, callback_data: MenuCallbackData) -
     await callback.message.answer(text, reply_markup=account_keyboard())
 
 
+@router.callback_query(MenuCallbackData.filter(F.section == "fin_today"))
+async def cb_fin_today(callback: CallbackQuery, callback_data: MenuCallbackData) -> None:
+    await callback.answer()
+    text = await get_finance_today_text()
+    await callback.message.answer(text, reply_markup=main_menu_keyboard())
+
+
 @router.callback_query(ReviewsCallbackData.filter())
 async def cb_reviews(callback: CallbackQuery, callback_data: ReviewsCallbackData) -> None:
     action = callback_data.action
@@ -266,11 +293,18 @@ async def cb_reviews(callback: CallbackQuery, callback_data: ReviewsCallbackData
     index = callback_data.index or 0
     user_id = callback.from_user.id
     review_id = callback_data.review_id
+    page = callback_data.page or 0
 
-    if action == "open_list":
+    if action in {"list", "list_page"}:
         await callback.answer()
-        await refresh_reviews(user_id)
-        await _send_review_card(user_id=user_id, category=category, index=0, callback=callback)
+        if action == "list":
+            await refresh_reviews(user_id)
+        await _send_reviews_list(user_id=user_id, category=category, page=page, callback=callback)
+        return
+
+    if action == "open_card":
+        await callback.answer()
+        await _send_review_card(user_id=user_id, category=category, index=index, callback=callback, review_id=review_id)
         return
 
     if action == "nav":
@@ -280,7 +314,11 @@ async def cb_reviews(callback: CallbackQuery, callback_data: ReviewsCallbackData
 
     if action == "switch":
         await callback.answer()
-        await _send_review_card(user_id=user_id, category=category, index=0, callback=callback)
+        await _send_reviews_list(user_id=user_id, category=category, page=0, callback=callback)
+        return
+
+    if action == "noop":
+        await callback.answer()
         return
 
     if action == "ai":
@@ -319,6 +357,9 @@ async def cb_reviews(callback: CallbackQuery, callback_data: ReviewsCallbackData
         )
         await _send_review_card(user_id=user_id, category=category, index=index, callback=callback, review_id=review_id)
         return
+
+    # fallback для неизвестных сообщений
+    await message.answer("Выберите действие в меню ниже", reply_markup=main_menu_keyboard())
 
 
 @router.message()

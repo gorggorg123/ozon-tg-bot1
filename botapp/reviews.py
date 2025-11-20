@@ -16,6 +16,7 @@ MAX_REVIEW_LEN = 450
 MAX_REVIEWS_LOAD = 200
 MSK_SHIFT = timedelta(hours=3)
 TELEGRAM_SOFT_LIMIT = 4000
+REVIEWS_PAGE_SIZE = 10
 
 _product_name_cache: dict[str, str | None] = {}
 _review_answered_cache: dict[int, set[str]] = {}
@@ -49,6 +50,7 @@ class ReviewSession:
     unanswered_reviews: List[ReviewCard] = field(default_factory=list)
     pretty_period: str = ""
     indexes: Dict[str, int] = field(default_factory=lambda: {"all": 0, "unanswered": 0, "answered": 0})
+    page: Dict[str, int] = field(default_factory=lambda: {"all": 0, "unanswered": 0, "answered": 0})
 
     def rebuild_unanswered(self, user_id: int) -> None:
         self.unanswered_reviews = [c for c in self.all_reviews if not is_answered(c, user_id)]
@@ -166,6 +168,16 @@ def _pick_product_label(card: ReviewCard) -> str:
     return "— (название недоступно)"
 
 
+def _pick_short_product_label(card: ReviewCard) -> str:
+    name = card.product_name or ""
+    product_id = card.product_id or card.offer_id or ""
+    if name:
+        return name[:35] + "…" if len(name) > 40 else name
+    if product_id:
+        return f"ID {product_id} (нет имени)"
+    return "—"
+
+
 def _format_review_card_text(card: ReviewCard, index: int, total: int, period_title: str, user_id: int) -> str:
     """Сформировать карточку одного отзыва."""
 
@@ -258,6 +270,52 @@ async def fetch_recent_reviews(
     return cards, pretty
 
 
+def _slice_cards(cards: List[ReviewCard], page: int, page_size: int) -> tuple[List[ReviewCard], int, int]:
+    total = len(cards)
+    total_pages = max(1, (total + page_size - 1) // page_size) if total else 1
+    safe_page = max(0, min(page, total_pages - 1))
+    start = safe_page * page_size
+    end = start + page_size
+    return cards[start:end], safe_page, total_pages
+
+
+def build_reviews_table(
+    *,
+    cards: List[ReviewCard],
+    pretty_period: str,
+    category: str,
+    user_id: int,
+    page: int = 0,
+    page_size: int = REVIEWS_PAGE_SIZE,
+) -> tuple[str, List[tuple[str, str | None, int]], int, int]:
+    if not cards:
+        return (
+            "Отзывы не найдены за выбранный период.",
+            [],
+            0,
+            0,
+        )
+
+    slice_items, safe_page, total_pages = _slice_cards(cards, page, page_size)
+    rows: List[str] = [f"⭐ Отзывы ({category})", pretty_period, ""]
+    items: List[tuple[str, str | None, int]] = []
+
+    for idx, card in enumerate(slice_items):
+        global_index = safe_page * page_size + idx
+        status = "✅" if is_answered(card, user_id) else "➕"
+        stars = f"⭐ {card.rating}" if card.rating else "—"
+        snippet = (card.text or "").strip()
+        if len(snippet) > 60:
+            snippet = snippet[:57] + "…"
+        date_line = _fmt_dt_msk(card.created_at)
+        product_short = _pick_short_product_label(card)
+        label = f"{status} {stars} | {snippet or 'пусто'} | {date_line} | {product_short}"
+        items.append((label, card.id, global_index))
+    rows.append(f"Страница {safe_page + 1}/{total_pages}")
+    text = "\n".join(rows)
+    return trim_for_telegram(text), items, safe_page, total_pages
+
+
 def _build_review_view(cards: List[ReviewCard], index: int, pretty: str, user_id: int) -> ReviewView:
     if not cards:
         return ReviewView(
@@ -316,6 +374,22 @@ async def get_review_view(
     view = _build_review_view(cards, index, session.pretty_period, user_id)
     session.indexes[category] = view.index
     return view
+
+
+async def get_reviews_table(
+    *, user_id: int, category: str = "all", page: int = 0, client: OzonClient | None = None
+) -> tuple[str, list[tuple[str, str | None, int]], int, int]:
+    session = await _ensure_session(user_id, client)
+    cards = _get_cards_for_category(session, category, user_id)
+    text, items, safe_page, total_pages = build_reviews_table(
+        cards=cards,
+        pretty_period=session.pretty_period,
+        category=category,
+        user_id=user_id,
+        page=page,
+    )
+    session.page[category] = safe_page
+    return text, items, safe_page, total_pages
 
 
 async def get_review_and_card(
@@ -406,6 +480,7 @@ __all__ = [
     "get_review_and_card",
     "get_review_by_id",
     "get_review_by_index",
+    "get_reviews_table",
     "refresh_reviews",
     "get_ai_reply_for_review",
     "mark_review_answered",
