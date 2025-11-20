@@ -99,7 +99,7 @@ async def _get_reviews_text(
     to: str,
     pretty: str,
 ) -> str:
-    reviews = await client.get_reviews(since, to, limit=120)
+    reviews = await client.get_reviews(since, to, limit=100, max_reviews=400)
     _remember_reviews(period_key, reviews)
 
     dist = {1: 0, 2: 0, 3: 0, 4: 0, 5: 0}

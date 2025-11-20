@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from datetime import datetime
+import os
 
 from .ozon_client import OzonClient, get_client
 
@@ -25,7 +25,7 @@ def _fmt_date(value: str | None) -> str | None:
 async def get_account_info_text(client: OzonClient | None = None) -> str:
     client = client or get_client()
     try:
-        info = await client.get_account_info()
+        info = await client.get_seller_info()
     except Exception as e:
         logger.exception("Failed to fetch account info")
         return "⚠️ Не удалось получить данные аккаунта. Попробуйте позже."
@@ -71,11 +71,15 @@ async def get_account_info_text(client: OzonClient | None = None) -> str:
     tax_system = None
     if isinstance(company, dict):
         tax_system = company.get("tax_system")
-    subscription = None
+    subscription = info.get("subscription") if isinstance(info, dict) else None
+    rating = None
     if isinstance(info, dict):
-        subscription = info.get("subscription")
+        statistics = info.get("statistics") or {}
+        rating = statistics.get("rating") or info.get("rating")
 
-    lines = ["👤 <b>Аккаунт Ozon</b>"]
+    debug = (os.getenv("DEBUG") or "").lower() in {"1", "true", "yes"}
+
+    lines = ["🧾 <b>Аккаунт Ozon</b>"]
 
     if company_name:
         lines.append(f"🏢 Компания: <b>{company_name}</b>")
@@ -91,8 +95,12 @@ async def get_account_info_text(client: OzonClient | None = None) -> str:
         lines.append(f"🔌 Подключение: {connected_at}")
     if tax_system:
         lines.append(f"💼 Налогообложение: {tax_system}")
-    if company_name:
-        lines.append("")
+    if rating:
+        try:
+            rating_val = float(rating)
+            lines.append(f"⭐ Средний рейтинг: {rating_val:.2f}")
+        except Exception:
+            pass
     if region:
         lines.append(f"📍 Регион/склад: {region}{(' • ' + warehouse) if warehouse else ''}")
     elif warehouse:
@@ -114,9 +122,14 @@ async def get_account_info_text(client: OzonClient | None = None) -> str:
         lines.append(
             "⚠️ Не удалось разобрать данные аккаунта."
         )
-    else:
-        # На всякий случай приложим сырой JSON снизу
-        lines.append("")
-        lines.append("<code>" + json.dumps(info, ensure_ascii=False) + "</code>")
+
+    if debug:
+        try:
+            import json
+
+            lines.append("")
+            lines.append("<code>" + json.dumps(info, ensure_ascii=False) + "</code>")
+        except Exception:
+            pass
 
     return "\n".join(lines)

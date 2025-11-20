@@ -48,7 +48,6 @@ router = Router()
 _last_reviews_period = "today"
 
 
-
 @router.message(CommandStart())
 async def cmd_start(message: Message) -> None:
     text = "Добро пожаловать! Выберите раздел в меню или используйте команды."
@@ -58,12 +57,6 @@ async def cmd_start(message: Message) -> None:
 @router.message(Command("fin_today"))
 async def cmd_fin_today(message: Message) -> None:
     text = await get_finance_today_text()
-    await message.answer(text)
-
-
-@router.message(Command("orders_today"))
-async def cmd_orders_today(message: Message) -> None:
-    text = await get_orders_today_text()
     await message.answer(text)
 
 
@@ -104,11 +97,41 @@ async def cb_fin_today(callback: CallbackQuery) -> None:
     await callback.message.answer(text)
 
 
-@router.callback_query(F.data == "orders_today")
-async def cb_orders_today(callback: CallbackQuery) -> None:
+@router.callback_query(F.data == "fbo_menu")
+async def cb_fbo_menu(callback: CallbackQuery) -> None:
     await callback.answer()
     text = await get_orders_today_text()
-    await callback.message.answer(text)
+    await callback.message.answer(text, reply_markup=fbo_keyboard())
+
+
+@router.callback_query(F.data == "fbo_summary")
+async def cb_fbo_summary(callback: CallbackQuery) -> None:
+    await callback.answer()
+    text = await get_orders_today_text()
+    try:
+        await callback.message.edit_text(text, reply_markup=fbo_keyboard())
+    except TelegramBadRequest:
+        await callback.message.answer(text, reply_markup=fbo_keyboard())
+
+
+@router.callback_query(F.data == "fbo_month")
+async def cb_fbo_month(callback: CallbackQuery) -> None:
+    await callback.answer("Сводка за месяц скоро")
+    await callback.message.answer(
+        "Месячная сводка пока в разработке, покажем как только будет готово.",
+        reply_markup=fbo_keyboard(),
+    )
+
+
+@router.callback_query(F.data == "fbo_filter")
+async def cb_fbo_filter(callback: CallbackQuery) -> None:
+    await callback.answer("Фильтр скоро")
+
+
+@router.callback_query(F.data == "to_menu")
+async def cb_to_menu(callback: CallbackQuery) -> None:
+    await callback.answer()
+    await callback.message.answer("Главное меню", reply_markup=main_menu_kb())
 
 
 @router.callback_query(F.data == "fbo_menu")

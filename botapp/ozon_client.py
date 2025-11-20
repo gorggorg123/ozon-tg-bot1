@@ -134,6 +134,10 @@ def _env_credentials() -> tuple[str, str]:
     return client_id, api_key
 
 
+class OzonAPIError(RuntimeError):
+    """Ошибка вызова Ozon API."""
+
+
 @dataclass
 class OzonClient:
     client_id: str
@@ -258,8 +262,8 @@ class OzonClient:
 
     # ---------- Аккаунт ----------
 
-    async def get_account_info(self) -> Dict[str, Any]:
-        """Получить информацию о продавце."""
+    async def get_seller_info(self) -> Dict[str, Any]:
+        """Получить информацию о продавце через SellerAPI /v1/seller/info."""
 
         api = self._get_seller_api()
         if api and hasattr(api, "seller_info"):
@@ -275,38 +279,33 @@ class OzonClient:
                 logger.exception("SellerAPI.seller_info failed, fallback to REST")
 
         data = await self.post("/v1/seller/info", {})
-        if isinstance(data, dict):
-            return data.get("result") or data
-        logger.error("Unexpected seller info response: %r", data)
-        return {}
+        if not isinstance(data, dict):
+            logger.error("Unexpected seller info response: %r", data)
+            raise OzonAPIError("Некорректный ответ seller/info")
+
+        res = data.get("result") if isinstance(data, dict) else None
+        if isinstance(res, dict):
+            return res
+        logger.error("Seller info response without result: %r", data)
+        raise OzonAPIError("Не удалось получить информацию о продавце")
 
     # ---------- Отзывы ----------
 
     async def get_reviews(
-        self, date_from_iso: str, date_to_iso: str, limit: int = 100
+        self, date_from_iso: str, date_to_iso: str, limit: int = 100, max_reviews: int = 400
     ) -> List[Dict[str, Any]]:
         """
-        /v1/review/list с пагинацией.
-
-        Метод поддерживает фильтр по дате только на уровне дней, поэтому
-        используем YYYY-MM-DD и листаем страницы, пока не закончится выдача.
+        /v1/review/list с пагинацией (limit 20-100) и остановками по дате/количеству.
         """
 
-        date_filter = {
-            "from": date_from_iso[:10],
-            "to": date_to_iso[:10],
-        }
+        safe_limit = min(max(limit, 20), 100)
+        date_filter = {"from": date_from_iso[:10], "to": date_to_iso[:10]}
 
-        page = 1
-        max_pages = 2
         reviews: List[Dict[str, Any]] = []
+        page = 1
 
-        while page <= max_pages:
-            body = {
-                "page": page,
-                "limit": limit,
-                "filter": {"date": date_filter},
-            }
+        while len(reviews) < max_reviews:
+            body = {"page": page, "limit": safe_limit, "filter": {"date": date_filter}}
             data = await self.post("/v1/review/list", body)
             if not isinstance(data, dict):
                 logger.error("Unexpected reviews response: %r", data)
@@ -315,26 +314,27 @@ class OzonClient:
             res = data.get("result") or data
             arr: List[Dict[str, Any]] = []
             if isinstance(res, dict):
-                arr = (
-                    res.get("reviews")
-                    or res.get("feedbacks")
-                    or res.get("items")
-                    or []
-                )
+                arr = res.get("reviews") or res.get("feedbacks") or res.get("items") or []
             elif isinstance(res, list):
                 arr = res
 
             page_items = [r for r in arr if isinstance(r, dict)]
             reviews.extend(page_items)
 
-            if len(page_items) < limit:
+            # Ozon API может не всегда возвращать total, поэтому останавливаемся по факту
+            if len(page_items) < safe_limit:
                 break
-            page += 1
 
-        return reviews
+            # extra защита от бесконечной пагинации
+            page += 1
+            if page > 20:
+                logger.warning("Reviews pagination stopped after 20 pages")
+                break
+
+        return reviews[:max_reviews]
 
     # back-compat
-    get_company_info = get_account_info
+    get_account_info = get_seller_info
 
 
 _client: OzonClient | None = None
