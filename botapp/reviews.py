@@ -56,6 +56,7 @@ class ReviewSession:
     indexes: Dict[str, int] = field(default_factory=lambda: {"all": 0, "unanswered": 0, "answered": 0})
     page: Dict[str, int] = field(default_factory=lambda: {"all": 0, "unanswered": 0, "answered": 0})
     loaded_at: datetime = field(default_factory=datetime.utcnow)
+    product_cache: Dict[str, str | None] = field(default_factory=dict)
 
     def rebuild_unanswered(self, user_id: int) -> None:
         self.unanswered_reviews = [c for c in self.all_reviews if not is_answered(c, user_id)]
@@ -128,17 +129,18 @@ def _parse_date(value: Any) -> datetime | None:
 def _fmt_dt_msk(dt: datetime | None) -> str:
     if not dt:
         return ""
-    dt_msk = dt + MSK_SHIFT
+    base_dt = dt.astimezone(timezone.utc).replace(tzinfo=None) if dt.tzinfo else dt
+    dt_msk = base_dt + MSK_SHIFT
     return dt_msk.strftime("%d.%m.%Y %H:%M")
 
 
 def _human_age(dt: datetime | None) -> str:
     if not dt:
         return ""
-    now_msk = datetime.utcnow() + MSK_SHIFT
-    dt_msk = dt + MSK_SHIFT
-    delta = now_msk - dt_msk
-    days = delta.days
+    base_dt = dt.astimezone(timezone.utc).replace(tzinfo=None) if dt.tzinfo else dt
+    dt_msk_date = (base_dt + MSK_SHIFT).date()
+    today_msk = (datetime.utcnow() + MSK_SHIFT).date()
+    days = (today_msk - dt_msk_date).days
     if days < 0:
         return "из будущего"
     if days == 0:
@@ -272,21 +274,16 @@ def _normalize_review(raw: Dict[str, Any]) -> ReviewCard:
     answered_flag = raw.get("answered") or raw.get("has_answer") or raw.get("is_answered")
     answered = bool(answer_payload or answered_flag)
 
-    product_block = raw.get("product") if isinstance(raw.get("product"), dict) else {}
+    product_block_raw = raw.get("product") or raw.get("product_info") or {}
+    product_block = product_block_raw if isinstance(product_block_raw, dict) else {}
+    product_id = raw.get("product_id") or raw.get("sku") or product_block.get("product_id")
+    offer_id = product_block.get("offer_id") or raw.get("offer_id") or raw.get("sku") or raw.get("product_id")
     product_name = (
-        raw.get("product_title")
+        product_block.get("name")
+        or raw.get("product_title")
         or raw.get("product_name")
         or raw.get("title")
-        or (product_block.get("name") if product_block else None)
     )
-
-    offer_id = (
-        raw.get("offer_id")
-        or raw.get("sku")
-        or raw.get("product_id")
-        or product_block.get("offer_id")
-    )
-    product_id = raw.get("product_id") or raw.get("sku") or product_block.get("product_id")
 
     # NEW: приводим идентификаторы к строкам, чтобы избежать ошибок .strip() для int
     offer_id = str(offer_id) if offer_id is not None else None
@@ -334,7 +331,7 @@ def _pick_product_label(card: ReviewCard) -> str:
     if product:
         return f"{product} (ID: {product_id})" if product_id else product
     if product_id:
-        return f"ID {product_id} (название не найдено)"
+        return f"ID {product_id} (не найден в каталоге)"
     return "— (название недоступно)"
 
 
@@ -350,7 +347,7 @@ def _pick_short_product_label(card: ReviewCard) -> str:
     if name:
         return name[:47] + "…" if len(name) > 50 else name
     if product_id:
-        return f"ID {product_id} (нет имени)"
+        return f"ID {product_id} (не найден в каталоге)"
     return "—"
 
 
@@ -402,22 +399,42 @@ def trim_for_telegram(text: str, max_len: int = TELEGRAM_SOFT_LIMIT) -> str:
     return text[: max_len - len(suffix)] + suffix
 
 
-async def _resolve_product_names(cards: List[ReviewCard], client: OzonClient) -> None:
-    missing_ids = [c.product_id for c in cards if c.product_id and not c.product_name]
+async def _resolve_product_names(
+    cards: List[ReviewCard], client: OzonClient, product_cache: Dict[str, str | None] | None = None
+) -> None:
+    cache = product_cache if product_cache is not None else {}
+
+    missing_ids: list[str] = []
+    for card in cards:
+        if not card.product_id:
+            continue
+        if card.product_id in cache:
+            if not card.product_name:
+                card.product_name = cache[card.product_id]
+            continue
+        if card.product_id in _product_name_cache:
+            cache[card.product_id] = _product_name_cache[card.product_id]
+            if not card.product_name:
+                card.product_name = cache[card.product_id]
+            continue
+        if not card.product_name:
+            missing_ids.append(card.product_id)
+
     unique_ids = [pid for pid in dict.fromkeys(missing_ids) if pid]
     for pid in unique_ids:
-        if pid in _product_name_cache:
+        if pid in cache:
             continue
         try:
             title = await client.get_product_name(pid)
         except Exception as exc:
             logger.warning("Failed to fetch product name for %s: %s", pid, exc)
             title = None
+        cache[pid] = title
         _product_name_cache[pid] = title
 
     for card in cards:
         if card.product_id and not card.product_name:
-            card.product_name = _product_name_cache.get(card.product_id) or card.product_name
+            card.product_name = cache.get(card.product_id) or _product_name_cache.get(card.product_id) or card.product_name
 
 
 async def fetch_recent_reviews(
@@ -426,10 +443,12 @@ async def fetch_recent_reviews(
     days: int = DEFAULT_RECENT_DAYS,
     limit_per_page: int = 80,
     max_reviews: int = MAX_REVIEWS_LOAD,
+    product_cache: Dict[str, str | None] | None = None,
 ) -> Tuple[List[ReviewCard], str]:
     """Загрузить отзывы за последние *days* дней одним списком."""
 
     client = client or get_client()
+    product_cache = product_cache if product_cache is not None else {}
     since_msk, to_msk, pretty = _msk_range_last_days(days)
     raw = await client.get_reviews(
         since_msk,
@@ -441,7 +460,7 @@ async def fetch_recent_reviews(
         # DEBUG: один пример для сверки схемы ReviewAPI, чтобы не спамить логи
         logger.debug("Sample review payload: %r", raw[0])
     cards = [_normalize_review(r) for r in raw if isinstance(r, dict)]
-    await _resolve_product_names(cards, client)
+    await _resolve_product_names(cards, client, product_cache)
     cards.sort(key=lambda c: c.created_at or datetime.min, reverse=True)
     logger.info(
         "Reviews fetched (flat): %s items, period=%s",
@@ -536,12 +555,14 @@ async def _ensure_session(user_id: int, client: OzonClient | None = None) -> Rev
     if session and (now - session.loaded_at) < SESSION_TTL:
         return session
 
-    cards, pretty = await fetch_recent_reviews(client)
+    product_cache: Dict[str, str | None] = {}
+    cards, pretty = await fetch_recent_reviews(client, product_cache=product_cache)
     session = ReviewSession(
         all_reviews=cards,
         unanswered_reviews=[c for c in cards if not is_answered(c, user_id)],
         pretty_period=pretty,
         loaded_at=now,
+        product_cache=product_cache,
     )
     _reset_review_tokens(user_id)
     _sessions[user_id] = session
@@ -647,12 +668,14 @@ async def get_review_by_id(
 
 async def refresh_reviews(user_id: int, client: OzonClient | None = None) -> ReviewSession:
     now = datetime.utcnow()
-    cards, pretty = await fetch_recent_reviews(client)
+    product_cache: Dict[str, str | None] = {}
+    cards, pretty = await fetch_recent_reviews(client, product_cache=product_cache)
     session = ReviewSession(
         all_reviews=cards,
         unanswered_reviews=[c for c in cards if not is_answered(c, user_id)],
         pretty_period=pretty,
         loaded_at=now,
+        product_cache=product_cache,
     )
     _reset_review_tokens(user_id)
     _sessions[user_id] = session
