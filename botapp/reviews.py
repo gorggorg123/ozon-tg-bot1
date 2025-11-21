@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Tuple
 
 from .ai_client import AIClientError, generate_review_reply
@@ -76,20 +76,25 @@ def _parse_date(value: Any) -> datetime | None:
     if isinstance(value, (int, float)):
         try:
             # heuristic: ms timestamps обычно больше 10**12
-            if value > 10**11:
-                return datetime.utcfromtimestamp(value / 1000)
-            return datetime.utcfromtimestamp(value)
+            parsed = datetime.utcfromtimestamp(value / 1000) if value > 10**11 else datetime.utcfromtimestamp(value)
+        except Exception:
+            return None
+    else:
+        parsed = None
+
+    # Строковый timestamp / ISO
+    if parsed is None:
+        try:
+            txt = str(value).strip()
+            if not txt:
+                return None
+            parsed = datetime.fromisoformat(txt.replace(" ", "T").replace("Z", "+00:00"))
         except Exception:
             return None
 
-    # Строковый timestamp / ISO
-    try:
-        txt = str(value).strip()
-        if not txt:
-            return None
-        return datetime.fromisoformat(txt.replace(" ", "T").replace("Z", "+00:00"))
-    except Exception:
-        return None
+    if parsed.tzinfo:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed.replace(tzinfo=None)
 
 
 def _fmt_dt_msk(dt: datetime | None) -> str:
