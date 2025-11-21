@@ -249,6 +249,14 @@ def _normalize_review(raw: Dict[str, Any]) -> ReviewCard:
         or _parse_date(raw.get("submitted_at"))
     )
 
+    product_name = raw.get("product_title") or raw.get("product_name") or raw.get("title")
+    offer_id = raw.get("offer_id") or raw.get("sku") or raw.get("product_id")
+    product_id = raw.get("product_id") or raw.get("sku") or None
+
+    # NEW: приводим идентификаторы к строкам, чтобы избежать ошибок .strip() для int
+    offer_id = str(offer_id) if offer_id is not None else None
+    product_id = str(product_id) if product_id is not None else None
+
     return ReviewCard(
         id=str(raw.get("id") or raw.get("review_id") or raw.get("uuid") or "") or None,
         rating=rating,
