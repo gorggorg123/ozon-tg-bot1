@@ -17,6 +17,7 @@ MAX_REVIEWS_LOAD = 200
 MSK_SHIFT = timedelta(hours=3)
 TELEGRAM_SOFT_LIMIT = 4000
 REVIEWS_PAGE_SIZE = 10
+SESSION_TTL = timedelta(minutes=2)
 
 _product_name_cache: dict[str, str | None] = {}
 _review_answered_cache: dict[int, set[str]] = {}
@@ -54,6 +55,7 @@ class ReviewSession:
     pretty_period: str = ""
     indexes: Dict[str, int] = field(default_factory=lambda: {"all": 0, "unanswered": 0, "answered": 0})
     page: Dict[str, int] = field(default_factory=lambda: {"all": 0, "unanswered": 0, "answered": 0})
+    loaded_at: datetime = field(default_factory=datetime.utcnow)
 
     def rebuild_unanswered(self, user_id: int) -> None:
         self.unanswered_reviews = [c for c in self.all_reviews if not is_answered(c, user_id)]
@@ -73,6 +75,22 @@ def _fmt_dt_msk(dt: datetime | None) -> str:
         return ""
     dt_msk = dt + MSK_SHIFT
     return dt_msk.strftime("%d.%m.%Y %H:%M")
+
+
+def _human_age(dt: datetime | None) -> str:
+    if not dt:
+        return ""
+    now_msk = datetime.utcnow() + MSK_SHIFT
+    dt_msk = dt + MSK_SHIFT
+    delta = now_msk - dt_msk
+    days = delta.days
+    if days < 0:
+        return "из будущего"
+    if days == 0:
+        return "сегодня"
+    if days == 1:
+        return "вчера"
+    return f"{days} дн. назад"
 
 
 def _msk_range_last_days(days: int = DEFAULT_RECENT_DAYS) -> Tuple[datetime, datetime, str]:
@@ -384,13 +402,22 @@ def build_reviews_table(
 
     for idx, card in enumerate(slice_items):
         global_index = safe_page * page_size + idx
-        status = "✅" if is_answered(card, user_id) else "✏️"
+        status_icon = "✅" if is_answered(card, user_id) else "✏️"
+        status_text = "Есть ответ" if is_answered(card, user_id) else "Без ответа"
         stars = f"{card.rating}★" if card.rating else "—"
+        product_short = _pick_short_product_label(card)
         snippet = (card.text or "").strip()
         if len(snippet) > 50:
             snippet = snippet[:47] + "…"
-        product_short = _pick_short_product_label(card)
-        label = f"{status} {stars} | {snippet or 'пусто'} | {product_short}"
+        date_part = _fmt_dt_msk(card.created_at) or "дата неизвестна"
+        age = _human_age(card.created_at)
+        age_part = f" ({age})" if age else ""
+        label = (
+            f"{status_icon} {stars} | {date_part}{age_part} | "
+            f"Товар: {product_short} | {status_text}"
+        )
+        if snippet:
+            label = f"{label} | {snippet}"
         token = _get_review_token(user_id, card.id)
         items.append((label, token, global_index))
 
@@ -420,14 +447,18 @@ def _build_review_view(cards: List[ReviewCard], index: int, pretty: str, user_id
 
 
 async def _ensure_session(user_id: int, client: OzonClient | None = None) -> ReviewSession:
-    if user_id in _sessions:
-        return _sessions[user_id]
+    session = _sessions.get(user_id)
+    now = datetime.utcnow()
+
+    if session and (now - session.loaded_at) < SESSION_TTL:
+        return session
 
     cards, pretty = await fetch_recent_reviews(client)
     session = ReviewSession(
         all_reviews=cards,
         unanswered_reviews=[c for c in cards if not is_answered(c, user_id)],
         pretty_period=pretty,
+        loaded_at=now,
     )
     _reset_review_tokens(user_id)
     _sessions[user_id] = session
@@ -532,11 +563,13 @@ async def get_review_by_id(
 
 
 async def refresh_reviews(user_id: int, client: OzonClient | None = None) -> ReviewSession:
+    now = datetime.utcnow()
     cards, pretty = await fetch_recent_reviews(client)
     session = ReviewSession(
         all_reviews=cards,
         unanswered_reviews=[c for c in cards if not is_answered(c, user_id)],
         pretty_period=pretty,
+        loaded_at=now,
     )
     _reset_review_tokens(user_id)
     _sessions[user_id] = session
