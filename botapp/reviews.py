@@ -192,24 +192,29 @@ def _pick_short_product_label(card: ReviewCard) -> str:
     return "—"
 
 
-def _format_review_card_text(card: ReviewCard, index: int, total: int, period_title: str, user_id: int) -> str:
-    """Сформировать карточку одного отзыва."""
+def format_review_card_text(
+    *,
+    card: ReviewCard,
+    index: int,
+    total: int,
+    period_title: str,
+    user_id: int,
+    current_answer: str | None = None,
+) -> str:
+    """Сформировать карточку одного отзыва с блоком текущего ответа."""
 
     date_line = _fmt_dt_msk(card.created_at)
     stars = f"{card.rating}★" if card.rating else "—"
-    status = "Есть ответ продавца" if is_answered(card, user_id) else "Без ответа"
     product_line = _pick_product_label(card)
+    status = "Есть ответ" if is_answered(card, user_id) else "Без ответа"
+    answer_text = current_answer or card.answer_text or "(ответа пока нет)"
 
-    lines = [f"⭐ Отзыв {index + 1}/{total}"]
+    title_parts = [f"{stars}"]
     if date_line:
-        lines.append(f"Дата: {date_line} (МСК)")
-    lines.extend(
-        [
-            f"Рейтинг: {stars}",
-            f"Позиция: {product_line}",
-        ]
-    )
+        title_parts.append(date_line)
+    title = " • ".join(title_parts) if title_parts else "Отзыв"
 
+    lines = [f"⭐ {title}", f"Позиция: {product_line}"]
     if card.id:
         lines.append(f"ID отзыва: {card.id}")
 
@@ -219,16 +224,13 @@ def _format_review_card_text(card: ReviewCard, index: int, total: int, period_ti
         card.text or "(пустой отзыв)",
         "",
         f"Статус: {status}",
+        "",
+        "Текущий ответ:",
+        answer_text,
     ])
 
-    if card.answer_text:
-        lines.extend([
-            "",
-            "Ответ покупателю:",
-            card.answer_text,
-        ])
-
-    return "\n".join(lines).strip()
+    body = "\n".join(lines).strip()
+    return trim_for_telegram(body)
 
 
 def trim_for_telegram(text: str, max_len: int = TELEGRAM_SOFT_LIMIT) -> str:
@@ -342,8 +344,13 @@ def _build_review_view(cards: List[ReviewCard], index: int, pretty: str, user_id
         )
 
     safe_index = max(0, min(index, len(cards) - 1))
-    text = _format_review_card_text(cards[safe_index], safe_index, len(cards), pretty, user_id)
-    text = trim_for_telegram(text)
+    text = format_review_card_text(
+        card=cards[safe_index],
+        index=safe_index,
+        total=len(cards),
+        period_title=pretty,
+        user_id=user_id,
+    )
     return ReviewView(text=text, index=safe_index, total=len(cards), period=pretty)
 
 
@@ -501,4 +508,5 @@ __all__ = [
     "get_ai_reply_for_review",
     "mark_review_answered",
     "is_answered",
+    "format_review_card_text",
 ]

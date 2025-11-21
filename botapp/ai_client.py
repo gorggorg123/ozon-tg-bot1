@@ -33,23 +33,35 @@ def _get_client() -> AsyncOpenAI:
 
 
 async def generate_review_reply(
+    *,
     review_text: str,
     product_name: str | None,
     rating: int | None,
+    user_prompt: str | None = None,
+    previous_answer: str | None = None,
     language: str = "ru",
-) -> str:
-    """Return a short, friendly draft reply to a customer review."""
+) -> str | None:
+    """Return a short, friendly draft reply to a customer review.
+
+    Возвращает None при любой ошибке OpenAI, чтобы верхний слой показал
+    пользователю лаконичное предупреждение.
+    """
 
     client = _get_client()
     system_prompt = (
         "Ты — продавец на Ozon. Пиши кратко, вежливо, по-человечески,"
         " без канцелярита и токсичности. Отвечай на русском."
     )
+
     user_parts = [f"Отзыв: {review_text.strip()}"[:2000]]
     if product_name:
         user_parts.append(f"Товар: {product_name}")
     if rating:
         user_parts.append(f"Оценка: {rating}★")
+    if previous_answer:
+        user_parts.append(f"Предыдущий вариант ответа: {previous_answer[:1000]}")
+    if user_prompt:
+        user_parts.append(f"Пожелание к ответу: {user_prompt.strip()[:800]}")
 
     message = "\n".join(user_parts)
     model = "gpt-4o-mini"
@@ -64,18 +76,15 @@ async def generate_review_reply(
             max_tokens=300,
             temperature=0.6,
         )
-    except PermissionDeniedError as exc:  # 403 model access
-        logger.warning("OpenAI permission error: %s", exc)
-        raise AIClientError("Модель недоступна для текущего ключа (gpt-4o-mini)") from exc
-    except NotFoundError as exc:
-        logger.warning("OpenAI model not found: %s", exc)
-        raise AIClientError("Модель недоступна для текущего ключа (gpt-4o-mini)") from exc
+    except (PermissionDeniedError, NotFoundError) as exc:  # 403/model not found
+        logger.warning("OpenAI model error: %s", exc)
+        return None
     except APIStatusError as exc:
-        logger.exception("OpenAI API status error: %s", exc)
-        raise AIClientError("⚠️ Не удалось получить ответ от ИИ, попробуйте позже.") from exc
+        logger.warning("OpenAI API status error: %s", exc)
+        return None
     except Exception as exc:  # pragma: no cover - защитный слой
         logger.exception("OpenAI unexpected error: %s", exc)
-        raise AIClientError("⚠️ Не удалось получить ответ от ИИ, попробуйте позже.") from exc
+        return None
 
     choice = resp.choices[0].message.content if resp.choices else None
     return choice.strip() if choice else "Спасибо за ваш отзыв!"

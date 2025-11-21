@@ -139,60 +139,56 @@ def reviews_root_keyboard() -> InlineKeyboardMarkup:
 def reviews_navigation_keyboard(
     category: str, index: int, total: int, review_id: str | None
 ) -> InlineKeyboardMarkup:
-    """Клавиатура для просмотра отдельного отзыва."""
+    """Клавиатура карточки отзыва (оставлена для обратной совместимости)."""
 
-    has_prev = index > 0
-    has_next = (index + 1) < total
+    return review_card_keyboard(category=category, page=0, review_id=review_id)
 
-    nav_row = [
-        InlineKeyboardButton(
-            text="⬅️ Предыдущий" if has_prev else "⏮️ Начало",
-            callback_data=ReviewsCallbackData(action="nav", category=category, index=max(index - 1, 0), review_id=review_id).pack(),
-        ),
-        InlineKeyboardButton(
-            text="Следующий ➡️" if has_next else "⏭️ Конец",
-            callback_data=ReviewsCallbackData(action="nav", category=category, index=min(index + 1, total - 1), review_id=review_id).pack(),
-        ),
-    ]
 
-    switch_category = "answered" if category != "answered" else "unanswered"
-    switch_label = "Показать отвеченные" if switch_category == "answered" else "Назад к неотвеченным"
+def review_card_keyboard(*, category: str, page: int, review_id: str | None) -> InlineKeyboardMarkup:
+    """Кнопки под карточкой отзыва."""
 
-    buttons = [
-        nav_row,
-        [
-            InlineKeyboardButton(
-                text="✏️ Ответить через ИИ",
-                callback_data=ReviewsCallbackData(action="ai", category=category, index=index, review_id=review_id).pack(),
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                text="✅ Пометить как отвеченный",
-                callback_data=ReviewsCallbackData(action="mark", category=category, index=index, review_id=review_id).pack(),
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                text=switch_label,
-                callback_data=ReviewsCallbackData(action="switch", category=switch_category, index=0).pack(),
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                text="⬅️ Назад к списку",
-                callback_data=ReviewsCallbackData(action="list", category=category, page=0).pack(),
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                text="⬅️ В главное меню",
-                callback_data=MenuCallbackData(section="home", action="open").pack(),
-            )
-        ],
-    ]
-
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✉️ Ответ через ИИ",
+                    callback_data=ReviewsCallbackData(
+                        action="card_ai", category=category, page=page, review_id=review_id
+                    ).pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔁 Пересобрать по моему промту",
+                    callback_data=ReviewsCallbackData(
+                        action="card_reprompt", category=category, page=page, review_id=review_id
+                    ).pack(),
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="✏️ Ввести ответ вручную",
+                    callback_data=ReviewsCallbackData(
+                        action="card_manual", category=category, page=page, review_id=review_id
+                    ).pack(),
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="⬅️ Назад к списку",
+                    callback_data=ReviewsCallbackData(
+                        action="list_page", category=category, page=page, review_id=review_id
+                    ).pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="⬅️ В главное меню",
+                    callback_data=MenuCallbackData(section="home", action="open").pack(),
+                )
+            ],
+        ]
+    )
 
 
 def reviews_list_keyboard(
@@ -292,6 +288,35 @@ def review_draft_keyboard(category: str, index: int, review_id: str | None) -> I
         ]
     )
 
+def review_draft_keyboard(category: str, index: int, review_id: str | None) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="👍 Отправить как есть",
+                    callback_data=ReviewsCallbackData(action="send", category=category, index=index, review_id=review_id).pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="♻️ Сгенерировать ещё",
+                    callback_data=ReviewsCallbackData(action="regen", category=category, index=index, review_id=review_id).pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="✍️ Отредактировать",
+                    callback_data=ReviewsCallbackData(action="edit", category=category, index=index, review_id=review_id).pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="⬅️ Назад к отзыву",
+                    callback_data=ReviewsCallbackData(action="nav", category=category, index=index, review_id=review_id).pack(),
+                )
+            ],
+        ]
+    )
 
 def account_keyboard() -> InlineKeyboardMarkup:
     return back_home_keyboard()
@@ -306,5 +331,6 @@ __all__ = [
     "reviews_root_keyboard",
     "reviews_navigation_keyboard",
     "review_draft_keyboard",
+    "review_card_keyboard",
     "account_keyboard",
 ]
