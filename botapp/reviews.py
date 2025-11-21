@@ -308,6 +308,10 @@ def _filter_reviews_and_stats(
     safe_from_msk = _ensure_msk(period_from_msk) if period_from_msk else None
     safe_to_msk = _ensure_msk(period_to_msk, end_of_day=to_is_date) if period_to_msk else None
 
+    # Если оба края заданы датами, сравниваем по календарным датам, чтобы избежать
+    # пограничных рассинхронизаций из-за времени в течение дня.
+    compare_by_date = from_is_date or to_is_date
+
     if safe_from_msk and safe_to_msk and safe_from_msk > safe_to_msk:
         safe_from_msk, safe_to_msk = safe_to_msk, safe_from_msk
 
@@ -334,7 +338,7 @@ def _filter_reviews_and_stats(
                 stats["missing_dates"] += 1
                 continue
 
-            if from_is_date or to_is_date:
+            if compare_by_date:
                 created_key = created_msk.date()
                 from_key = safe_from_msk.date() if safe_from_msk else None
                 to_key = safe_to_msk.date() if safe_to_msk else None
@@ -626,8 +630,14 @@ async def fetch_recent_reviews(
         # DEBUG: один пример для сверки схемы ReviewAPI, чтобы не спамить логи
         logger.debug("Sample review payload: %r", raw[0])
     cards = [_normalize_review(r) for r in raw if isinstance(r, dict)]
+    filter_from_date = since_msk.date()
+    filter_to_date = to_msk.date()
+
     filtered_cards, stats = _filter_reviews_and_stats(
-        cards, period_from_msk=since_msk, period_to_msk=to_msk, answer_filter="all"
+        cards,
+        period_from_msk=filter_from_date,
+        period_to_msk=filter_to_date,
+        answer_filter="all",
     )
     await _resolve_product_names(filtered_cards, client, product_cache)
     filtered_cards.sort(
@@ -639,10 +649,12 @@ async def fetch_recent_reviews(
     answered_count = len(filter_reviews(filtered_cards, answer_filter="answered"))
 
     logger.info(
-        "Reviews fetched from API: %s items (UTC range: %s — %s)",
+        "Reviews fetched from API: %s items (UTC range: %s — %s) | filter_msk_dates=%s..%s",
         len(raw),
         (fetch_from_utc or fetch_since_msk).isoformat(),
         (fetch_to_utc or to_msk).isoformat(),
+        filter_from_date,
+        filter_to_date,
     )
 
     raw_dates_msk = [dt for dt in (_to_msk(c.created_at) for c in cards) if dt]
