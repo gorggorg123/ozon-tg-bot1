@@ -209,7 +209,11 @@ def reviews_list_keyboard(
                 InlineKeyboardButton(
                     text=label,
                     callback_data=ReviewsCallbackData(
-                        action="open_card", category=category, index=idx, review_id=review_id
+                        action="open_card",
+                        category=category,
+                        index=idx,
+                        review_id=review_id,
+                        page=page,
                     ).pack(),
                 )
             ]

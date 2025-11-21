@@ -169,10 +169,13 @@ def _pick_product_label(card: ReviewCard) -> str:
 
 
 def _pick_short_product_label(card: ReviewCard) -> str:
-    name = card.product_name or ""
-    product_id = card.product_id or card.offer_id or ""
+    """Короткое имя товара для таблицы."""
+
+    name = (card.product_name or "").strip()
+    product_id = (card.product_id or card.offer_id or "").strip()
+
     if name:
-        return name[:35] + "…" if len(name) > 40 else name
+        return name[:47] + "…" if len(name) > 50 else name
     if product_id:
         return f"ID {product_id} (нет имени)"
     return "—"
@@ -288,6 +291,8 @@ def build_reviews_table(
     page: int = 0,
     page_size: int = REVIEWS_PAGE_SIZE,
 ) -> tuple[str, List[tuple[str, str | None, int]], int, int]:
+    """Собрать текст таблицы и кнопки для списка отзывов."""
+
     if not cards:
         return (
             "Отзывы не найдены за выбранный период.",
@@ -302,15 +307,15 @@ def build_reviews_table(
 
     for idx, card in enumerate(slice_items):
         global_index = safe_page * page_size + idx
-        status = "✅" if is_answered(card, user_id) else "➕"
-        stars = f"⭐ {card.rating}" if card.rating else "—"
+        status = "✅" if is_answered(card, user_id) else "✏️"
+        stars = f"{card.rating}★" if card.rating else "—"
         snippet = (card.text or "").strip()
-        if len(snippet) > 60:
-            snippet = snippet[:57] + "…"
-        date_line = _fmt_dt_msk(card.created_at)
+        if len(snippet) > 50:
+            snippet = snippet[:47] + "…"
         product_short = _pick_short_product_label(card)
-        label = f"{status} {stars} | {snippet or 'пусто'} | {date_line} | {product_short}"
+        label = f"{status} {stars} | {snippet or 'пусто'} | {product_short}"
         items.append((label, card.id, global_index))
+
     rows.append(f"Страница {safe_page + 1}/{total_pages}")
     text = "\n".join(rows)
     return trim_for_telegram(text), items, safe_page, total_pages
