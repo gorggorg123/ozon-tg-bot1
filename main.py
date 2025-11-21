@@ -469,6 +469,9 @@ async def cb_reviews(callback: CallbackQuery, callback_data: ReviewsCallbackData
         await callback.message.answer("Пришлите текст ответа, я сохраню его как текущий.")
         return
 
+    # fallback для неизвестных сообщений
+    await message.answer("Выберите действие в меню ниже", reply_markup=main_menu_keyboard())
+
 
 @router.message(ReviewAnswerStates.reprompt)
 async def handle_reprompt(message: Message, state: FSMContext) -> None:

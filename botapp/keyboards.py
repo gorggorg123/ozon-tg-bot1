@@ -288,6 +288,35 @@ def review_draft_keyboard(category: str, index: int, review_id: str | None) -> I
         ]
     )
 
+def review_draft_keyboard(category: str, index: int, review_id: str | None) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="👍 Отправить как есть",
+                    callback_data=ReviewsCallbackData(action="send", category=category, index=index, review_id=review_id).pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="♻️ Сгенерировать ещё",
+                    callback_data=ReviewsCallbackData(action="regen", category=category, index=index, review_id=review_id).pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="✍️ Отредактировать",
+                    callback_data=ReviewsCallbackData(action="edit", category=category, index=index, review_id=review_id).pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="⬅️ Назад к отзыву",
+                    callback_data=ReviewsCallbackData(action="nav", category=category, index=index, review_id=review_id).pack(),
+                )
+            ],
+        ]
+    )
 
 def account_keyboard() -> InlineKeyboardMarkup:
     return back_home_keyboard()
