@@ -128,13 +128,21 @@ def _normalize_review(raw: Dict[str, Any]) -> ReviewCard:
 
     answered = bool(answer_payload or raw.get("answered"))
 
+    product_name = raw.get("product_title") or raw.get("product_name") or raw.get("title")
+    offer_id = raw.get("offer_id") or raw.get("sku") or raw.get("product_id")
+    product_id = raw.get("product_id") or raw.get("sku") or None
+
+    # NEW: приводим идентификаторы к строкам, чтобы избежать ошибок .strip() для int
+    offer_id = str(offer_id) if offer_id is not None else None
+    product_id = str(product_id) if product_id is not None else None
+
     return ReviewCard(
         id=str(raw.get("id") or raw.get("review_id") or "") or None,
         rating=rating,
         text=text,
-        product_name=(raw.get("product_title") or raw.get("product_name") or raw.get("title")),
-        offer_id=(raw.get("offer_id") or raw.get("sku") or raw.get("product_id")),
-        product_id=(raw.get("product_id") or raw.get("sku") or None),
+        product_name=product_name,
+        offer_id=offer_id,
+        product_id=product_id,
         created_at=(
             _parse_date(raw.get("date"))
             or _parse_date(raw.get("created_at"))
@@ -172,7 +180,8 @@ def _pick_short_product_label(card: ReviewCard) -> str:
     """Короткое имя товара для таблицы."""
 
     name = (card.product_name or "").strip()
-    product_id = (card.product_id or card.offer_id or "").strip()
+    product_id_raw = card.product_id or card.offer_id or ""
+    product_id = str(product_id_raw).strip()
 
     if name:
         return name[:47] + "…" if len(name) > 50 else name
