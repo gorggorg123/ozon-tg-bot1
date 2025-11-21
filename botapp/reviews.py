@@ -62,14 +62,42 @@ class ReviewSession:
 
 
 def _parse_date(value: Any) -> datetime | None:
-    """Привести любые варианты дат из ReviewAPI к datetime.
+    """Привести любые варианты дат из ReviewAPI к datetime (UTC).
 
-    В ответе v1/review/list поле может приходить как ISO-строка, так и unix-число.
-    Мы обрабатываем оба варианта, чтобы дата всегда отображалась и участвовала
-    в сортировке.
+    Ozon может вернуть ``created_at`` как ISO-строку, строку с числовым timestamp
+    или голое число (sec/ms). Чтобы не получать сдвиги на год, нормализуем всё
+    к ``datetime`` в UTC без дополнительных «магических» правок.
     """
 
     if value is None or value == "":
+        return None
+
+    # Числовой timestamp (секунды или миллисекунды)
+    if isinstance(value, (int, float)):
+        try:
+            if value > 10**11:  # миллисекунды
+                return datetime.utcfromtimestamp(value / 1000)
+            return datetime.utcfromtimestamp(value)
+        except Exception:
+            return None
+
+    # Строка может содержать чистые цифры либо ISO
+    try:
+        txt = str(value).strip()
+        if not txt:
+            return None
+
+        if txt.isdigit():
+            num = int(txt)
+            if num > 10**11:
+                return datetime.utcfromtimestamp(num / 1000)
+            return datetime.utcfromtimestamp(num)
+
+        dt = datetime.fromisoformat(txt.replace(" ", "T").replace("Z", "+00:00"))
+        if dt.tzinfo:
+            return dt.astimezone(timezone.utc).replace(tzinfo=None)
+        return dt
+    except Exception:
         return None
 
     # Числовой timestamp (секунды или миллисекунды)
@@ -228,19 +256,37 @@ def _normalize_review(raw: Dict[str, Any]) -> ReviewCard:
     if len(text) > MAX_REVIEW_LEN:
         text = text[: MAX_REVIEW_LEN - 1] + "…"
 
-    answer_payload = raw.get("answer") or raw.get("reply") or raw.get("response") or {}
+    answer_payload = (
+        raw.get("answer")
+        or raw.get("reply")
+        or raw.get("response")
+        or raw.get("seller_answer")
+        or {}
+    )
     answer_text = ""
     if isinstance(answer_payload, dict):
         answer_text = str(answer_payload.get("text") or answer_payload.get("comment") or "").strip()
     elif isinstance(answer_payload, str):
         answer_text = answer_payload.strip()
 
-    answered_flag = raw.get("answered") or raw.get("has_answer")
+    answered_flag = raw.get("answered") or raw.get("has_answer") or raw.get("is_answered")
     answered = bool(answer_payload or answered_flag)
 
-    product_name = raw.get("product_title") or raw.get("product_name") or raw.get("title")
-    offer_id = raw.get("offer_id") or raw.get("sku") or raw.get("product_id")
-    product_id = raw.get("product_id") or raw.get("sku") or None
+    product_name = (
+        raw.get("product_title")
+        or raw.get("product_name")
+        or raw.get("title")
+        or (product_block.get("name") if product_block else None)
+    )
+    product_block = raw.get("product") if isinstance(raw.get("product"), dict) else {}
+
+    offer_id = (
+        raw.get("offer_id")
+        or raw.get("sku")
+        or raw.get("product_id")
+        or product_block.get("offer_id")
+    )
+    product_id = raw.get("product_id") or raw.get("sku") or product_block.get("product_id")
 
     # NEW: приводим идентификаторы к строкам, чтобы избежать ошибок .strip() для int
     offer_id = str(offer_id) if offer_id is not None else None
@@ -249,18 +295,12 @@ def _normalize_review(raw: Dict[str, Any]) -> ReviewCard:
     created_at = (
         _parse_date(raw.get("created_at"))
         or _parse_date(raw.get("createdAt"))
+        or _parse_date(raw.get("creation_date"))
+        or _parse_date(raw.get("created_date"))
         or _parse_date(raw.get("date"))
         or _parse_date(raw.get("published_at"))
         or _parse_date(raw.get("submitted_at"))
     )
-
-    product_name = raw.get("product_title") or raw.get("product_name") or raw.get("title")
-    offer_id = raw.get("offer_id") or raw.get("sku") or raw.get("product_id")
-    product_id = raw.get("product_id") or raw.get("sku") or None
-
-    # NEW: приводим идентификаторы к строкам, чтобы избежать ошибок .strip() для int
-    offer_id = str(offer_id) if offer_id is not None else None
-    product_id = str(product_id) if product_id is not None else None
 
     return ReviewCard(
         id=str(raw.get("id") or raw.get("review_id") or raw.get("uuid") or "") or None,
