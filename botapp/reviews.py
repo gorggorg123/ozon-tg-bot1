@@ -21,6 +21,9 @@ REVIEWS_PAGE_SIZE = 10
 _product_name_cache: dict[str, str | None] = {}
 _review_answered_cache: dict[int, set[str]] = {}
 _sessions: dict[int, "ReviewSession"] = {}
+# NEW: Короткие токены для review_id, чтобы callback_data помещалась в лимит Telegram
+_review_id_to_token: dict[int, dict[str, str]] = {}
+_token_to_review_id: dict[int, dict[str, str]] = {}
 
 
 @dataclass
@@ -102,6 +105,67 @@ def is_answered(review: ReviewCard, user_id: int | None = None) -> bool:
     if review.id and review.id in user_cache:
         return True
     return bool(review.answered or (review.answer_text and review.answer_text.strip()))
+
+
+def _reset_review_tokens(user_id: int) -> None:
+    """Очистить токены отзывов для пользователя (при обновлении списка)."""
+
+    _review_id_to_token[user_id] = {}
+    _token_to_review_id[user_id] = {}
+
+
+def _base36(num: int) -> str:
+    alphabet = "0123456789abcdefghijklmnopqrstuvwxyz"
+    if num == 0:
+        return "0"
+    digits = []
+    while num:
+        num, rem = divmod(num, 36)
+        digits.append(alphabet[rem])
+    return "".join(reversed(digits))
+
+
+def _get_review_token(user_id: int, review_id: str | None) -> str | None:
+    """Выдать короткий токен для review_id, чтобы уместиться в 64 байта callback."""
+
+    if not review_id:
+        return None
+    bucket = _review_id_to_token.setdefault(user_id, {})
+    if review_id in bucket:
+        return bucket[review_id]
+
+    # Хэшируем и переводим в base36, ограничиваем длину, чтобы избежать переполнения
+    raw = abs(hash((user_id, review_id)))
+    token = _base36(raw)[:8]
+    if not token:
+        token = "r0"
+
+    # Разрешаем редкие коллизии, добавляя суффикс
+    used = _token_to_review_id.setdefault(user_id, {})
+    suffix = 0
+    while token in used and used[token] != review_id:
+        suffix += 1
+        token_candidate = f"{token[:6]}{_base36(suffix)[:2]}"
+        token = token_candidate[:8]
+
+    bucket[review_id] = token
+    used[token] = review_id
+    return token
+
+
+def resolve_review_id(user_id: int, review_ref: str | None) -> str | None:
+    """Преобразовать токен из callback обратно в реальный review_id."""
+
+    if not review_ref:
+        return None
+    mapping = _token_to_review_id.get(user_id, {})
+    return mapping.get(review_ref, review_ref)
+
+
+def encode_review_id(user_id: int, review_id: str | None) -> str | None:
+    """Вернуть короткий токен для review_id."""
+
+    return _get_review_token(user_id, review_id)
 
 
 def mark_review_answered(review_id: str | None, user_id: int) -> None:
@@ -327,7 +391,8 @@ def build_reviews_table(
             snippet = snippet[:47] + "…"
         product_short = _pick_short_product_label(card)
         label = f"{status} {stars} | {snippet or 'пусто'} | {product_short}"
-        items.append((label, card.id, global_index))
+        token = _get_review_token(user_id, card.id)
+        items.append((label, token, global_index))
 
     rows.append(f"Страница {safe_page + 1}/{total_pages}")
     text = "\n".join(rows)
@@ -364,6 +429,7 @@ async def _ensure_session(user_id: int, client: OzonClient | None = None) -> Rev
         unanswered_reviews=[c for c in cards if not is_answered(c, user_id)],
         pretty_period=pretty,
     )
+    _reset_review_tokens(user_id)
     _sessions[user_id] = session
     return session
 
@@ -472,6 +538,7 @@ async def refresh_reviews(user_id: int, client: OzonClient | None = None) -> Rev
         unanswered_reviews=[c for c in cards if not is_answered(c, user_id)],
         pretty_period=pretty,
     )
+    _reset_review_tokens(user_id)
     _sessions[user_id] = session
     return session
 
@@ -508,5 +575,7 @@ __all__ = [
     "get_ai_reply_for_review",
     "mark_review_answered",
     "is_answered",
+    "encode_review_id",
+    "resolve_review_id",
     "format_review_card_text",
 ]

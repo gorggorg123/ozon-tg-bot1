@@ -39,6 +39,8 @@ from botapp.reviews import (
     get_review_view,
     get_reviews_table,
     mark_review_answered,
+    encode_review_id,
+    resolve_review_id,
     refresh_reviews,
     trim_for_telegram,
 )
@@ -252,7 +254,9 @@ async def _send_review_card(
             user_id=user_id,
             current_answer=current_answer,
         )
-        markup = review_card_keyboard(category=category, page=page, review_id=card.id)
+        markup = review_card_keyboard(
+            category=category, page=page, review_id=encode_review_id(user_id, card.id)
+        )
 
     target = callback.message if callback else message
     list_msg = _reviews_list_messages.get(user_id)
@@ -402,7 +406,8 @@ async def cb_reviews(callback: CallbackQuery, callback_data: ReviewsCallbackData
     category = callback_data.category or "unanswered"
     index = callback_data.index or 0
     user_id = callback.from_user.id
-    review_id = callback_data.review_id
+    review_token = callback_data.review_id
+    review_id = resolve_review_id(user_id, review_token)
     page = callback_data.page or 0
 
     if action in {"list", "list_page"}:
@@ -470,6 +475,60 @@ async def cb_reviews(callback: CallbackQuery, callback_data: ReviewsCallbackData
         return
 
     # fallback для неизвестных сообщений
+    await message.answer("Выберите действие в меню ниже", reply_markup=main_menu_keyboard())
+
+
+@router.message(ReviewAnswerStates.reprompt)
+async def handle_reprompt(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    await state.clear()
+    review_id = data.get("review_id")
+    category = data.get("category") or "all"
+    page = int(data.get("page") or 0)
+    user_id = message.from_user.id
+
+    review, _ = await get_review_by_id(user_id, category, review_id)
+    if not review:
+        await message.answer("Не удалось найти отзыв для пересборки.")
+        return
+
+    await _handle_ai_reply(
+        callback=message,  # type: ignore[arg-type]
+        category=category,
+        page=page,
+        review=review,
+        user_prompt=(message.text or message.caption or ""),
+    )
+
+
+@router.message(ReviewAnswerStates.manual)
+async def handle_manual_answer(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    await state.clear()
+    review_id = data.get("review_id")
+    category = data.get("category") or "all"
+    page = int(data.get("page") or 0)
+    user_id = message.from_user.id
+
+    text = (message.text or message.caption or "").strip()
+    if not text:
+        await message.answer("Ответ пустой, пришлите текст.")
+        return
+
+    _remember_local_answer(user_id, review_id, text)
+    await _send_review_card(
+        user_id=user_id,
+        category=category,
+        index=0,
+        message=message,
+        review_id=review_id,
+        page=page,
+        answer_override=text,
+    )
+
+
+@router.message()
+async def handle_any(message: Message) -> None:
     await message.answer("Выберите действие в меню ниже", reply_markup=main_menu_keyboard())
 
 
