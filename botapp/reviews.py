@@ -299,8 +299,11 @@ def _filter_reviews_and_stats(
 ) -> tuple[List[ReviewCard], dict[str, int]]:
     """Отфильтровать отзывы и вернуть счётчики исключений."""
 
+    from_is_date = isinstance(period_from_msk, date) and not isinstance(period_from_msk, datetime)
+    to_is_date = isinstance(period_to_msk, date) and not isinstance(period_to_msk, datetime)
+
     safe_from = _ensure_msk(period_from_msk) if period_from_msk else None
-    safe_to = _ensure_msk(period_to_msk, end_of_day=True) if period_to_msk else None
+    safe_to = _ensure_msk(period_to_msk, end_of_day=to_is_date) if period_to_msk else None
 
     if safe_from and safe_to and safe_from > safe_to:
         safe_from, safe_to = safe_to, safe_from
@@ -313,6 +316,8 @@ def _filter_reviews_and_stats(
     }
 
     filtered: list[ReviewCard] = []
+    collected_dates: list[datetime] = []
+
     for review in reviews:
         created_msk = _to_msk(review.created_at)
 
@@ -320,10 +325,22 @@ def _filter_reviews_and_stats(
             if created_msk is None:
                 stats["missing_dates"] += 1
                 continue
-            if safe_from and created_msk < safe_from:
+
+            collected_dates.append(created_msk)
+
+            if from_is_date or to_is_date:
+                created_key = created_msk.date()
+                from_key = safe_from.date() if safe_from else None
+                to_key = safe_to.date() if safe_to else None
+            else:
+                created_key = created_msk
+                from_key = safe_from
+                to_key = safe_to
+
+            if from_key and created_key < from_key:
                 stats["dropped_by_date"] += 1
                 continue
-            if safe_to and created_msk > safe_to:
+            if to_key and created_key > to_key:
                 stats["dropped_by_date"] += 1
                 continue
 
@@ -336,6 +353,18 @@ def _filter_reviews_and_stats(
 
     stats["answered"] = sum(1 for r in filtered if _has_answer_payload(r))
     stats["unanswered"] = len(filtered) - stats["answered"]
+
+    if (safe_from or safe_to) and collected_dates:
+        earliest = min(collected_dates)
+        latest = max(collected_dates)
+        logger.debug(
+            "Filter window=%s..%s (MSK), seen=%s..%s (MSK) before drops", 
+            safe_from,
+            safe_to,
+            earliest,
+            latest,
+        )
+
     return filtered, stats
 
 
