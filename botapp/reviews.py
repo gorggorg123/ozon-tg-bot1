@@ -1,3 +1,4 @@
+# botapp/reviews.py
 from __future__ import annotations
 
 import logging
@@ -12,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_RECENT_DAYS = 30
 MAX_REVIEW_LEN = 450
-MAX_REVIEWS_LOAD = 2000  # было 200 — из-за этого брали только 200 старых отзывов
+MAX_REVIEWS_LOAD = 2000  # было 200, увеличено, чтобы брать больше свежих отзывов
 MSK_SHIFT = timedelta(hours=3)
 MSK_TZ = timezone(MSK_SHIFT)
 TELEGRAM_SOFT_LIMIT = 4000
@@ -616,6 +617,7 @@ async def fetch_recent_reviews(
     client = client or get_client()
     product_cache = product_cache if product_cache is not None else {}
     since_msk, to_msk, pretty = _msk_range_last_days(days)
+    # Берём чуть шире окно для запроса, чтобы не потерять отзывы на границах
     fetch_since_msk = since_msk - timedelta(days=2)
     fetch_from_utc = _to_utc(fetch_since_msk)
     fetch_to_utc = _to_utc(to_msk)
@@ -926,7 +928,7 @@ async def get_reviews_menu_text() -> str:
     _, _, pretty = _msk_range_last_days(DEFAULT_RECENT_DAYS)
     return (
         "⭐ Отзывы\n"
-        "Выберите список: новые без ответа или все за период."\
+        "Выберите список: новые без ответа или все за период."
         f"\n{pretty}"
     )
 
@@ -950,3 +952,4 @@ __all__ = [
     "resolve_review_id",
     "format_review_card_text",
 ]
+
