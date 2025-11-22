@@ -40,6 +40,12 @@ def _ensure_utc(dt: datetime) -> datetime:
     return dt.replace(tzinfo=timezone.utc)
 
 
+def _ensure_utc(dt: datetime) -> datetime:
+    if dt.tzinfo:
+        return dt.astimezone(timezone.utc)
+    return dt.replace(tzinfo=timezone.utc)
+
+
 def msk_today_range() -> Tuple[str, str, str]:
     """
     Диапазон на сегодня в МСК, но границы в UTC.
