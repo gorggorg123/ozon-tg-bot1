@@ -608,7 +608,7 @@ async def fetch_recent_reviews(
     client: OzonClient | None = None,
     *,
     days: int = DEFAULT_RECENT_DAYS,
-    limit_per_page: int = 80,
+    limit_per_page: int = 100,
     max_reviews: int = MAX_REVIEWS_LOAD,
     product_cache: Dict[str, str | None] | None = None,
 ) -> Tuple[List[ReviewCard], str]:
