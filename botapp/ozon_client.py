@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, timezone
 from typing import Any, Dict, List, Tuple
 
 import httpx
@@ -21,6 +21,7 @@ load_dotenv()
 
 BASE_URL = "https://api-seller.ozon.ru"
 MSK_SHIFT = timedelta(hours=3)
+MSK_TZ = timezone(MSK_SHIFT)
 
 _product_name_cache: dict[str, str | None] = {}
 _product_not_found_warned: set[str] = set()
@@ -28,7 +29,15 @@ _product_not_found_warned: set[str] = set()
 
 def _iso_z(dt: datetime) -> str:
     """Вернуть ISO-строку в UTC с Z без миллисекунд."""
-    return dt.replace(microsecond=0).isoformat() + "Z"
+
+    dt_utc = _ensure_utc(dt)
+    return dt_utc.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _ensure_utc(dt: datetime) -> datetime:
+    if dt.tzinfo:
+        return dt.astimezone(timezone.utc)
+    return dt.replace(tzinfo=timezone.utc)
 
 
 def msk_today_range() -> Tuple[str, str, str]:
@@ -317,34 +326,39 @@ class OzonClient:
         date_to: datetime,
         *,
         limit_per_page: int = 80,
-        offset: int = 0,
         max_count: int | None = 200,
     ) -> List[Dict[str, Any]]:
-        """Загрузить отзывы через /v1/review/list c контролем лимитов.
+        """
+        Загрузить отзывы через /v1/review/list с корректной пагинацией по last_id.
 
-        Ozon принимает ``Limit`` строго в диапазоне ``[20, 100]``. Чтобы не спамить
-        API лишними вызовами, позволяем задать максимальное количество отзывов
-        ``max_count`` (по умолчанию 200) и пагинируем по ``offset`` с шагом
-        ``safe_limit``.
+        ВАЖНО:
+        - Ozon ожидает поля `date_from` и `date_to` в корне тела запроса, а не
+          `filter.date.{from,to}`.
+        - Пагинация делается по `last_id` + `has_next`. Offset используем не будем,
+          чтобы не застревать на старых отзывах.
         """
 
         safe_limit = max(20, min(limit_per_page, 100))
         max_reviews = max_count if max_count is not None else 10_000
 
-        date_filter = {
-            "from": date_from.date().isoformat(),
-            "to": date_to.date().isoformat(),
-        }
+        date_from_utc = _ensure_utc(date_from)
+        date_to_utc = _ensure_utc(date_to)
 
         reviews: List[Dict[str, Any]] = []
-        current_offset = max(0, offset)
+        last_id: str | None = None
+        pages = 0
 
         while len(reviews) < max_reviews:
-            body = {
+            body: Dict[str, Any] = {
+                "date_from": _iso_z(date_from_utc),
+                "date_to": _iso_z(date_to_utc),
                 "limit": safe_limit,
-                "offset": current_offset,
-                "filter": {"date": date_filter},
             }
+
+            # Ozon поддерживает пагинацию через last_id + has_next.
+            # Если last_id уже получен, продолжаем с него.
+            if last_id:
+                body["last_id"] = last_id
 
             data = await self.post("/v1/review/list", body)
             if not isinstance(data, dict):
@@ -354,31 +368,46 @@ class OzonClient:
             res = data.get("result") or data
             if isinstance(res, dict):
                 arr = res.get("reviews") or res.get("feedbacks") or res.get("items") or []
+                has_next = bool(res.get("has_next") or res.get("hasNext"))
+                next_last_id = res.get("last_id") or res.get("lastId")
             elif isinstance(res, list):
                 arr = res
+                has_next = False
+                next_last_id = None
             else:
-                arr = []
+                logger.error("Unexpected reviews result payload: %r", res)
+                break
 
-            page_items = [r for r in arr if isinstance(r, dict)]
+            if not isinstance(arr, list):
+                logger.error("Unexpected reviews array type: %r", arr)
+                break
+
+            page_items = [x for x in arr if isinstance(x, dict)]
             if not page_items:
+                # Пустая страница — выходим
                 break
 
             reviews.extend(page_items)
+            pages += 1
 
-            if len(page_items) < safe_limit:
+            if len(reviews) >= max_reviews:
                 break
 
-            current_offset += safe_limit
-            if current_offset >= max_reviews:
-                break
+            if has_next and next_last_id:
+                # Нормальная пагинация по last_id
+                last_id = str(next_last_id)
+                continue
+
+            # has_next == False или нет last_id — дальше страниц нет
+            break
 
         logger.info(
-            "Reviews fetched: %s items for %s..%s limit=%s offset_start=%s max=%s",
+            "Reviews fetched: %s items for %s..%s limit=%s pages=%s max=%s",
             len(reviews),
-            date_filter.get("from"),
-            date_filter.get("to"),
+            _iso_z(date_from_utc),
+            _iso_z(date_to_utc),
             safe_limit,
-            offset,
+            pages,
             max_count,
         )
         return reviews[:max_reviews]
